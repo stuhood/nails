@@ -6,7 +6,7 @@ extern crate tokio_service;
 
 use std::io;
 use std::str;
-use bytes::{BigEndian, ByteOrder, BytesMut, Bytes};
+use bytes::{BigEndian, ByteOrder, BytesMut, Bytes, BufMut};
 use tokio_io::codec::{Encoder, Decoder};
 use tokio_proto::streaming::pipeline::Frame;
 
@@ -23,10 +23,10 @@ pub enum InputChunk {
 }
 
 pub enum OutputChunk {
-    Pid,
+    Pid(usize),
     StartReadingInput,
-    Stdout,
-    Stderr,
+    Stdout(Bytes),
+    Stderr(Bytes),
     Exit,
 }
 
@@ -75,14 +75,47 @@ impl Decoder for Codec {
     }
 }
 
-/*
 impl Encoder for Codec {
     type Item = Frame<OutputChunk, (), io::Error>;
     type Error = io::Error;
 
-    // ...
+    fn encode(&mut self, frame: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
+      let msg = match frame {
+        Frame::Message { message, .. } => message,
+        Frame::Body { .. } => unreachable!(),
+        Frame::Error { error } => return Err(error),
+      };
+
+      // Reserve enough space for the header, and then split into header and chunk.
+      buf.reserve(HEADER_SIZE);
+      let mut chunk = buf.split_off(HEADER_SIZE);
+      let header = buf;
+
+      // Write chunk data into the chunk.
+      let msg_type =
+        match msg {
+          OutputChunk::Pid(pid) => {
+            chunk.extend_from_slice(&format!("{}", pid).as_bytes());
+            b'P'
+          },
+          OutputChunk::StartReadingInput => b'S',
+          OutputChunk::Stdout(bytes) => {
+            chunk.extend_from_slice(&bytes);
+            b'1'
+          },
+          OutputChunk::Stderr(bytes) => {
+            chunk.extend_from_slice(&bytes);
+            b'2'
+          },
+          OutputChunk::Exit => b'X',
+        };
+
+      // Then write the msg type and body length into the header.
+      header.put_u8(msg_type);
+      header.put_u32::<BigEndian>(chunk.len() as u32);
+      Ok(())
+    }
 }
-*/
 
 fn msg<T>(message: T) -> Result<Option<Frame<T, (), io::Error>>, io::Error> {
   // We're using the tokio `streaming` pattern, but without bodies: all messages are
