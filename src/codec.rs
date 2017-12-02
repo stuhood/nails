@@ -2,7 +2,6 @@ use std::io;
 use std::str;
 use bytes::{BigEndian, ByteOrder, BytesMut, Bytes, BufMut};
 use tokio_io::codec::{Encoder, Decoder};
-use tokio_proto::streaming::pipeline::Frame;
 
 
 pub enum InputChunk {
@@ -30,7 +29,7 @@ const HEADER_SIZE: usize = 5;
 pub struct Codec;
 
 impl Decoder for Codec {
-    type Item = Frame<InputChunk, (), io::Error>;
+    type Item = InputChunk;
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -71,16 +70,10 @@ impl Decoder for Codec {
 }
 
 impl Encoder for Codec {
-    type Item = Frame<OutputChunk, (), io::Error>;
+    type Item = OutputChunk;
     type Error = io::Error;
 
-    fn encode(&mut self, frame: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
-      let msg = match frame {
-        Frame::Message { message, .. } => message,
-        Frame::Body { .. } => unreachable!(),
-        Frame::Error { error } => return Err(error),
-      };
-
+    fn encode(&mut self, msg: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
       // Reserve enough space for the header, and then split into header and chunk.
       buf.reserve(HEADER_SIZE);
       let mut chunk = buf.split_off(HEADER_SIZE);
@@ -112,17 +105,10 @@ impl Encoder for Codec {
     }
 }
 
-fn msg<T>(message: T) -> Result<Option<Frame<T, (), io::Error>>, io::Error> {
+fn msg<T>(message: T) -> Result<Option<T>, io::Error> {
     // We're using the tokio `streaming` pattern, but without bodies: all messages are
     // chunked to be small enough to fully decode.
-    Ok(
-        Some(
-            Frame::Message {
-                message: message,
-                body: false,
-            }
-        )
-    )
+    Ok(Some(message))
 }
 
 fn err(e: &str) -> io::Error {
