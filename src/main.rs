@@ -7,5 +7,5 @@ mod codec;
 mod server;
 
 fn main() {
-    println!("Hello, world!");
+    server::serve("127.0.0.1:12000")
 }

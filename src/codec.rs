@@ -1,9 +1,11 @@
 use std::io;
 use std::str;
+use std::path::PathBuf;
+
 use bytes::{BigEndian, ByteOrder, BytesMut, Bytes, BufMut};
 use tokio_io::codec::{Encoder, Decoder};
 
-
+#[derive(Debug)]
 pub enum InputChunk {
     Argument(String),
     Environment {
@@ -16,6 +18,7 @@ pub enum InputChunk {
     StdinEOF,
 }
 
+#[derive(Debug)]
 pub enum OutputChunk {
     Pid(usize),
     StartReadingInput,
@@ -37,18 +40,19 @@ impl Decoder for Codec {
         if buf.len() < HEADER_SIZE {
             return Ok(None);
         }
-        let length = BigEndian::read_u32(&buf[1..HEADER_SIZE]);
+        let length = BigEndian::read_u32(&buf[0..HEADER_SIZE-1]);
+
+        println!("Got chunk length: {} (have {} in the buf).", length, buf.len());
 
         // If we have the remainder of the chunk, decode and emit it.
-        let chunk_length = HEADER_SIZE + length as usize;
-        if buf.len() < chunk_length {
+        if buf.len() < HEADER_SIZE + length as usize {
             return Ok(None)
         }
 
         // Decode the chunk.
         let header = buf.split_to(HEADER_SIZE);
-        let mut chunk = buf.split_to(chunk_length);
-        match header[0] {
+        let mut chunk = buf.split_to(length as usize);
+        match header[HEADER_SIZE-1] {
             b'A' => msg(InputChunk::Argument(to_string(&chunk)?)),
             b'E' => {
               let equals_position =
@@ -60,7 +64,7 @@ impl Decoder for Codec {
               let val = to_string(&chunk.split_off(1))?;
               msg(InputChunk::Environment { key, val })
             },
-            b'D' => msg(InputChunk::WorkingDir(PathBuf::from(to_string(&chunk)?)),
+            b'D' => msg(InputChunk::WorkingDir(PathBuf::from(to_string(&chunk)?))),
             b'C' => msg(InputChunk::Command(to_string(&chunk)?)),
             b'0' => msg(InputChunk::Stdin(chunk.freeze())),
             b'.' => msg(InputChunk::StdinEOF),
