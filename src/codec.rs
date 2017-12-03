@@ -10,7 +10,7 @@ pub enum InputChunk {
       key: String,
       val: String
     },
-    WorkingDir(String),
+    WorkingDir(PathBuf),
     Command(String),
     Stdin(Bytes),
     StdinEOF,
@@ -60,7 +60,7 @@ impl Decoder for Codec {
               let val = to_string(&chunk.split_off(1))?;
               msg(InputChunk::Environment { key, val })
             },
-            b'D' => msg(InputChunk::WorkingDir(to_string(&chunk)?)),
+            b'D' => msg(InputChunk::WorkingDir(PathBuf::from(to_string(&chunk)?)),
             b'C' => msg(InputChunk::Command(to_string(&chunk)?)),
             b'0' => msg(InputChunk::Stdin(chunk.freeze())),
             b'.' => msg(InputChunk::StdinEOF),

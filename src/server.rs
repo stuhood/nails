@@ -10,13 +10,13 @@ use codec::Codec;
 fn serve(addr: &str) {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-    let remote_addr = "127.0.0.1:14566".parse().unwrap();
+    let remote_addr = addr.parse().unwrap();
 
     let listener = TcpListener::bind(&remote_addr, &handle).unwrap();
     let server = listener.incoming().for_each(move |(socket, _)| {
         let transport = socket.framed(Codec);
 
-        let process_connection = transport.for_each(|chunk| {
+        let process_connection = transport.fold(|chunk| {
             // Consume initialization chunks, then send accept for stdin.
             ...
         });
