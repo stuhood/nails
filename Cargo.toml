@@ -5,9 +5,6 @@ authors = ["Stu Hood <stuhood@twitter.com>"]
 
 [dependencies]
 bytes = "0.4"
-futures = { git = "https://github.com/stuhood/futures-rs", rev = "cf0624fe3964c0a05dc5b8966d51f357b6ebcf03" }
+futures = "0.1"
 tokio-io = "0.1"
 tokio-core = "0.1"
-
-[patch.crates-io]
-futures = { git = "https://github.com/stuhood/futures-rs", rev = "cf0624fe3964c0a05dc5b8966d51f357b6ebcf03" }
