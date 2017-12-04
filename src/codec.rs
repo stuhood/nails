@@ -21,7 +21,7 @@ pub enum InputChunk {
 #[derive(Debug)]
 pub enum OutputChunk {
     Pid(usize),
-    StartReadingInput,
+    StartReadingStdin,
     Stdout(Bytes),
     Stderr(Bytes),
     Exit,
@@ -29,6 +29,7 @@ pub enum OutputChunk {
 
 const HEADER_SIZE: usize = 5;
 
+#[derive(Debug)]
 pub struct Codec;
 
 impl Decoder for Codec {
@@ -41,8 +42,6 @@ impl Decoder for Codec {
             return Ok(None);
         }
         let length = BigEndian::read_u32(&buf[0..HEADER_SIZE-1]);
-
-        println!("Got chunk length: {} (have {} in the buf).", length, buf.len());
 
         // If we have the remainder of the chunk, decode and emit it.
         if buf.len() < HEADER_SIZE + length as usize {
@@ -90,7 +89,7 @@ impl Encoder for Codec {
             chunk.extend_from_slice(&format!("{}", pid).as_bytes());
             b'P'
           },
-          OutputChunk::StartReadingInput => b'S',
+          OutputChunk::StartReadingStdin => b'S',
           OutputChunk::Stdout(bytes) => {
             chunk.extend_from_slice(&bytes);
             b'1'
@@ -103,8 +102,8 @@ impl Encoder for Codec {
         };
 
       // Then write the msg type and body length into the header.
-      header.put_u8(msg_type);
       header.put_u32::<BigEndian>(chunk.len() as u32);
+      header.put_u8(msg_type);
       Ok(())
     }
 }
@@ -115,7 +114,7 @@ fn msg<T>(message: T) -> Result<Option<T>, io::Error> {
     Ok(Some(message))
 }
 
-fn err(e: &str) -> io::Error {
+pub fn err(e: &str) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
 }
 
