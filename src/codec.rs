@@ -20,7 +20,6 @@ pub enum InputChunk {
 
 #[derive(Debug)]
 pub enum OutputChunk {
-    Pid(usize),
     StartReadingStdin,
     Stdout(Bytes),
     Stderr(Bytes),
@@ -85,10 +84,6 @@ impl Encoder for Codec {
       // Write chunk data into the chunk.
       let msg_type =
         match msg {
-          OutputChunk::Pid(pid) => {
-            chunk.extend_from_slice(&format!("{}", pid).as_bytes());
-            b'P'
-          },
           OutputChunk::StartReadingStdin => b'S',
           OutputChunk::Stdout(bytes) => {
             chunk.extend_from_slice(&bytes);
