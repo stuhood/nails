@@ -16,7 +16,6 @@ use tokio_core::reactor::Core;
 use tokio_io::AsyncRead;
 
 use codec::Codec;
-use proto::Proto;
 
 fn main() {
     let mut core = Core::new().unwrap();
@@ -29,7 +28,7 @@ fn main() {
         println!("Got connection: {:?}", socket);
         let transport = socket.framed(Codec);
 
-        handle.spawn(Proto::execute(transport).map_err(|_| ()));
+        handle.spawn(proto::execute(transport).map_err(|_| ()));
 
         Ok(())
     });

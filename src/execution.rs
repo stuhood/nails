@@ -21,24 +21,20 @@ pub struct Args {
 
 pub struct Child {
     description: String,
-    stdout: Box<Stream<Item=Option<Vec<u8>>, Error=io::Error>>,
-    stderr: Box<Stream<Item=Option<Vec<u8>>, Error=io::Error>>,
-    exit: Box<Future<Item=ExitStatus, Error=io::Error>>,
+    stdout: Box<Stream<Item = Option<Vec<u8>>, Error = io::Error>>,
+    stderr: Box<Stream<Item = Option<Vec<u8>>, Error = io::Error>>,
+    exit: Box<Future<Item = ExitStatus, Error = io::Error>>,
 }
 
 impl fmt::Debug for Child {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Child")
-           .field("description", &self.description)
-           .finish()
+            .field("description", &self.description)
+            .finish()
     }
 }
 
-pub fn spawn(
-    cmd: String,
-    args: Args,
-    working_dir: PathBuf,
-) -> Result<Child, io::Error> {
+pub fn spawn(cmd: String, args: Args, working_dir: PathBuf) -> Result<Child, io::Error> {
     Command::new(cmd)
         .args(args.args)
         .env_clear()
@@ -53,7 +49,12 @@ pub fn spawn(
             let stdout = stream_for(child.stdout.take().unwrap());
             let stderr = stream_for(child.stderr.take().unwrap());
             let exit = Box::new(POOL.spawn_fn(move || child.wait()));
-            Child { description, stdout, stderr, exit }
+            Child {
+                description,
+                stdout,
+                stderr,
+                exit,
+            }
         })
 }
 
@@ -61,22 +62,19 @@ pub fn spawn(
 /// TODO: The `Option` in the stream is because we need an unfold that operates on Future<Option>
 /// rather than Option<Future>.
 ///
-fn stream_for<R: Read + Send + Sized + 'static>(r: R) -> Box<Stream<Item=Option<Vec<u8>>, Error=io::Error>> {
-    Box::new(
-        stream::unfold(r, |mut pipe| {
-            Some(
-                POOL.spawn_fn(move || {
-                    let mut bytes = vec![0; READ_BUF_SIZE];;
-                    match pipe.read(&mut bytes)? {
-                        0 =>
-                            Ok((None, pipe)),
-                        read => {
-                            bytes.truncate(read);
-                            Ok((Some(bytes), pipe))
-                        },
-                    }
-                })
-            )
-        })
-    )
+fn stream_for<R: Read + Send + Sized + 'static>(
+    r: R,
+) -> Box<Stream<Item = Option<Vec<u8>>, Error = io::Error>> {
+    Box::new(stream::unfold(r, |mut pipe| {
+        Some(POOL.spawn_fn(move || {
+            let mut bytes = vec![0; READ_BUF_SIZE];
+            match pipe.read(&mut bytes)? {
+                0 => Ok((None, pipe)),
+                read => {
+                    bytes.truncate(read);
+                    Ok((Some(bytes), pipe))
+                }
+            }
+        }))
+    }))
 }
