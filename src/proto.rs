@@ -8,30 +8,23 @@ use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::codec::Framed;
 
 use codec::{Codec, InputChunk, OutputChunk};
-
-#[derive(Debug, Default)]
-pub struct Args {
-    args: Vec<String>,
-    env: Vec<(String, String)>,
-}
-
-type Proc = String;
+use execution::{self, Args, Child};
 
 #[derive(Debug)]
-enum State<T> where T: Debug {
+enum State<C> where C: Debug {
     // While we're gathering arguments and environment, but before the working directory has
     // arrived.
-    Initializing(T, Args),
+    Initializing(C, Args),
     // After the working directory has arrived, but before the command arrives.
     PreCommand {
-        client: T,
+        client: C,
         args: Args,
         working_dir: PathBuf,
     },
     // Executing, and able to receive stdin.
-    Executing(T, Proc),
+    Executing(C, Child),
     // Executing, after stdin has been closed.
-    ExecutingPostStdin(T, Proc),
+    ExecutingPostStdin(C, Child),
     // Process has finished executing.
     Exited,
 }
@@ -57,14 +50,7 @@ impl Proto {
                     ok(State::PreCommand { client, args, working_dir })
                 },
                 (State::PreCommand { client, args, working_dir }, InputChunk::Command(cmd)) => {
-                    // TODO: Start process, signal stdin.
-                    let p = format!("Executing {:?} {:?} {:?}", args, working_dir, cmd);
-                    println!("{}", p);
-                    Box::new(
-                        client
-                            .send(OutputChunk::StartReadingStdin)
-                            .and_then(|client| Ok(State::Executing(client, p)))
-                    )
+                    spawn(client, args, working_dir, cmd)
                 },
                 (e @ State::Executing(..), InputChunk::Stdin(bytes)) => {
                     // TODO: Send stdin to process.
@@ -75,13 +61,50 @@ impl Proto {
                     // TODO: Enqueue stdin close.
                     ok(State::ExecutingPostStdin(client, p))
                 },
+                (s, InputChunk::Heartbeat) => {
+                    // Not documented in the spec, but presumably always valid and ignored?
+                    ok(s)
+                },
                 (s, c) => {
                     err(&format!("Received invalid chunk {:?} during phase {:?}", c, s))
                 },
             })
-            .and_then(|_| Ok(()))
+            .then(|e| {
+                println!("Connection closed in state {:?}", e);
+                Ok(())
+            })
         )
     }
+}
+
+fn spawn<C: Debug + Sink<SinkItem=OutputChunk, SinkError=io::Error> + 'static>(
+    client: C,
+    args: Args,
+    working_dir: PathBuf,
+    cmd: String
+) -> Box<Future<Item=State<C>, Error=io::Error>> {
+    Box::new(
+        future::result(execution::spawn(cmd, args, working_dir))
+            .then(move |res| match res {
+                Ok(child) => {
+                    println!("Launched child as: {:?}", child);
+                    Box::new(
+                        client
+                            .send(OutputChunk::StartReadingStdin)
+                            .map(|client| State::Executing(client, child))
+                    ) as Box<Future<Item=State<_>, Error=io::Error>>
+                },
+                Err(e) => {
+                    // TODO: Send as stderr.
+                    println!("Failed to launch child: {:?}", e);
+                    Box::new(
+                        client
+                            .send(OutputChunk::Exit(1))
+                            .map(|_| State::Exited)
+                    ) as Box<Future<Item=State<_>, Error=io::Error>>
+                },
+            })
+    )
 }
 
 fn ok<T: 'static>(t: T) -> Box<Future<Item=T, Error=io::Error>> {

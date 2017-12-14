@@ -14,6 +14,7 @@ pub enum InputChunk {
     },
     WorkingDir(PathBuf),
     Command(String),
+    Heartbeat,
     Stdin(Bytes),
     StdinEOF,
 }
@@ -23,7 +24,7 @@ pub enum OutputChunk {
     StartReadingStdin,
     Stdout(Bytes),
     Stderr(Bytes),
-    Exit,
+    Exit(u8),
 }
 
 const HEADER_SIZE: usize = 5;
@@ -64,9 +65,10 @@ impl Decoder for Codec {
             },
             b'D' => msg(InputChunk::WorkingDir(PathBuf::from(to_string(&chunk)?))),
             b'C' => msg(InputChunk::Command(to_string(&chunk)?)),
+            b'H' => msg(InputChunk::Heartbeat),
             b'0' => msg(InputChunk::Stdin(chunk.freeze())),
             b'.' => msg(InputChunk::StdinEOF),
-            b    => Err(err(&format!("Unrecognized chunk type: {:?}", b))),
+            b    => Err(err(&format!("Unrecognized chunk type: {} with len {}", b as char, length))),
         }
     }
 }
@@ -77,28 +79,31 @@ impl Encoder for Codec {
 
     fn encode(&mut self, msg: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
       // Reserve enough space for the header, and then split into header and chunk.
-      buf.reserve(HEADER_SIZE);
-      let mut chunk = buf.split_off(HEADER_SIZE);
-      let header = buf;
+      buf.put_slice(&[0u8;HEADER_SIZE]);
 
-      // Write chunk data into the chunk.
+      // Write chunk data.
       let msg_type =
         match msg {
           OutputChunk::StartReadingStdin => b'S',
           OutputChunk::Stdout(bytes) => {
-            chunk.extend_from_slice(&bytes);
+            buf.extend_from_slice(&bytes);
             b'1'
           },
           OutputChunk::Stderr(bytes) => {
-            chunk.extend_from_slice(&bytes);
+            buf.extend_from_slice(&bytes);
             b'2'
           },
-          OutputChunk::Exit => b'X',
+          OutputChunk::Exit(code) => {
+            buf.extend_from_slice(&format!("{}", code).into_bytes());
+            b'X'
+          },
         };
 
       // Then write the msg type and body length into the header.
-      header.put_u32::<BigEndian>(chunk.len() as u32);
-      header.put_u8(msg_type);
+      let buf_len = buf.len() - HEADER_SIZE;
+      BigEndian::write_u32(&mut buf[0..HEADER_SIZE-1], buf_len as u32);
+      buf[HEADER_SIZE-1] = msg_type;
+
       Ok(())
     }
 }
