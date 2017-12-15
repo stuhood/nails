@@ -3,15 +3,21 @@ use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::fmt;
 
+use bytes::Bytes;
 use futures_cpupool::CpuPool;
 use futures::{stream, Future, Stream};
+use futures::sync::mpsc;
 
 lazy_static! {
-    // TODO: Should probably be an unbounded pool.
+    // Each member of this pool will be blocked reading one of stderr/stdout/exit for
+    // a child process.
+    // TODO: Should really be unbounded, or not a pool.
     static ref POOL: CpuPool = CpuPool::new(16);
 }
 
-const READ_BUF_SIZE: usize = 1024;
+// Total memory usage should be BUF_SIZE * BUF_COUNT.
+const BUF_SIZE: usize = 4096;
+const BUF_COUNT: usize = 128;
 
 #[derive(Debug, Default)]
 pub struct Args {
@@ -34,13 +40,21 @@ impl fmt::Debug for Child {
     }
 }
 
+#[derive(Debug)]
 pub enum ChildOutput {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
+    Stdout(Bytes),
+    Stderr(Bytes),
     Exit(u8),
 }
 
-pub fn spawn(cmd: String, args: Args, working_dir: PathBuf, outputs: Sender<ChildOutput>) -> Result<Child, io::Error> {
+///
+/// Creates a channel with a buffer appropriately sized for ChildOutput events.
+///
+pub fn child_channel() -> (mpsc::Sender<ChildOutput>, mpsc::Receiver<ChildOutput>) {
+    mpsc::channel(BUF_COUNT)
+}
+
+pub fn spawn(cmd: String, args: Args, working_dir: PathBuf) -> Result<Child, io::Error> {
     Command::new(cmd)
         .args(args.args)
         .env_clear()
@@ -73,7 +87,7 @@ fn stream_for<R: Read + Send + Sized + 'static>(
 ) -> Box<Stream<Item = Option<Vec<u8>>, Error = io::Error>> {
     Box::new(stream::unfold(r, |mut pipe| {
         Some(POOL.spawn_fn(move || {
-            let mut bytes = vec![0; READ_BUF_SIZE];
+            let mut bytes = vec![0; BUF_SIZE];
             match pipe.read(&mut bytes)? {
                 0 => Ok((None, pipe)),
                 read => {
