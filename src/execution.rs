@@ -34,7 +34,13 @@ impl fmt::Debug for Child {
     }
 }
 
-pub fn spawn(cmd: String, args: Args, working_dir: PathBuf) -> Result<Child, io::Error> {
+pub enum ChildOutput {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit(u8),
+}
+
+pub fn spawn(cmd: String, args: Args, working_dir: PathBuf, outputs: Sender<ChildOutput>) -> Result<Child, io::Error> {
     Command::new(cmd)
         .args(args.args)
         .env_clear()

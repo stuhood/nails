@@ -8,39 +8,52 @@ use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::codec::Framed;
 
 use codec::{Codec, InputChunk, OutputChunk};
-use execution::{self, Args, Child};
+use execution::{self, Args, Child, ChildOutput};
 
 #[derive(Debug)]
-enum State<C>
+enum State<ClientWrite, ChildWrite>
 where
-    C: Debug,
+    ClientWrite: Debug,
 {
     // While we're gathering arguments and environment, but before the working directory has
     // arrived.
-    Initializing(C, Args),
+    Initializing(ClientWrite, ChildWrite, Args),
     // After the working directory has arrived, but before the command arrives.
     PreCommand {
-        client: C,
+        client: ClientWrite,
+        child: ChildWrite,
         args: Args,
         working_dir: PathBuf,
     },
     // Executing, and able to receive stdin.
-    Executing(C, Child),
+    Executing(ClientWrite, Child),
     // Executing, after stdin has been closed.
-    ExecutingPostStdin(C, Child),
+    ExecutingPostStdin(ClientWrite, Child),
     // Process has finished executing.
     Exited,
+}
+
+enum Event {
+    Client(InputChunk),
+    Child(ChildOutput),
 }
 
 pub fn execute<T>(transport: Framed<T, Codec>) -> Box<Future<Item = (), Error = io::Error>>
 where
     T: AsyncRead + AsyncWrite + Debug + 'static,
 {
-    let (write, read) = transport.split();
+    // Create a channel to consume process output from a forked subprocess, and split the client
+    // transport into write and read portions.
+    let (process_write, process_read) = channel::<ChildOutput>();
+    let (client_write, client_read) = transport.split();
+
+    // Select on the two input sources to create a merged Stream of events.
+    let events_read = process_read.map(|c| Event::Child(c)).select(client_read.map(|c| Event::Client(c)));
+
     Box::new(
-        read.fold(State::Initializing(write, Default::default()), step)
+        events_read.fold(State::Initializing(client_write, process_write, Default::default()), step)
             .then(|e| {
-                println!("Connection closed in state {:?}", e);
+                println!("Connection finished in state {:?}", e);
                 Ok(())
             }),
     )
