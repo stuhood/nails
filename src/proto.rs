@@ -4,12 +4,12 @@ use std::io;
 use std::path::PathBuf;
 
 use futures::{future, Future, Stream, Sink};
-use futures::sync::mpsc;
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::codec::Framed;
+use tokio_core::reactor::Handle;
 
 use codec::{Codec, InputChunk, OutputChunk};
-use execution::{self, Args, Child, ChildOutput, child_channel};
+use execution::{self, Args, Child, ChildOutput, child_channel, ProcessSink};
 
 #[derive(Debug)]
 enum State<C: ClientSink, P: ProcessSink> {
@@ -30,7 +30,10 @@ enum Event {
     Process(ChildOutput),
 }
 
-pub fn execute<T>(transport: Framed<T, Codec>) -> Box<Future<Item = (), Error = io::Error>>
+pub fn execute<T>(
+    handle: Handle,
+    transport: Framed<T, Codec>,
+) -> Box<Future<Item = (), Error = io::Error>>
 where
     T: AsyncRead + AsyncWrite + Debug + 'static,
 {
@@ -51,7 +54,7 @@ where
         events_read
             .fold(
                 State::Initializing(client_write, process_write, Default::default()),
-                step,
+                move |state, ev| step(&handle, state, ev),
             )
             .then(|e| {
                 println!("Connection finished in state {:?}", e);
@@ -60,7 +63,11 @@ where
     )
 }
 
-fn step<C, P>(state: State<C, P>, ev: Event) -> Box<Future<Item = State<C, P>, Error = io::Error>>
+fn step<C, P>(
+    handle: &Handle,
+    state: State<C, P>,
+    ev: Event,
+) -> Box<Future<Item = State<C, P>, Error = io::Error>>
 where
     C: ClientSink,
     P: ProcessSink,
@@ -81,20 +88,21 @@ where
         (State::PreCommand(client, process, args, working_dir),
          Event::Client(InputChunk::Command(cmd))) => {
             Box::new(
-                future::result(execution::spawn(cmd, args, working_dir)).then(move |res| match res {
-                    Ok(child) => {
-                        println!("Launched child as: {:?}", child);
-                        Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
-                            State::Executing(client, child)
-                        })) as LoopBox<_, _>
-                    }
-                    Err(e) => {
-                        // TODO: Send as stderr.
-                        println!("Failed to launch child: {:?}", e);
-                        Box::new(client.send(OutputChunk::Exit(1)).map(|_| State::Exited)) as
-                            LoopBox<_, _>
-                    }
-                }),
+                future::result(execution::spawn(cmd, args, working_dir, process, handle))
+                    .then(move |res| match res {
+                        Ok(child) => {
+                            println!("Launched child as: {:?}", child);
+                            Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
+                                State::Executing(client, child)
+                            })) as LoopBox<_, _>
+                        }
+                        Err(e) => {
+                            // TODO: Send as stderr.
+                            println!("Failed to launch child: {:?}", e);
+                            Box::new(client.send(OutputChunk::Exit(1)).map(|_| State::Exited)) as
+                                LoopBox<_, _>
+                        }
+                    }),
             )
         }
         (e @ State::Executing(..), Event::Client(InputChunk::Stdin(bytes))) => {
@@ -161,20 +169,5 @@ trait ClientSink
 impl<T> ClientSink for T
 where
     T: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static,
-{
-}
-
-///
-///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
-///
-trait ProcessSink
-    : Debug + Sink<SinkItem = ChildOutput, SinkError = mpsc::SendError<ChildOutput>> + 'static
-    {
-}
-impl<T> ProcessSink for T
-where
-    T: Debug
-        + Sink<SinkItem = ChildOutput, SinkError = mpsc::SendError<ChildOutput>>
-        + 'static,
 {
 }

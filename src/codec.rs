@@ -21,7 +21,7 @@ pub enum OutputChunk {
     StartReadingStdin,
     Stdout(Bytes),
     Stderr(Bytes),
-    Exit(u8),
+    Exit(i32),
 }
 
 const HEADER_SIZE: usize = 5;
@@ -78,6 +78,7 @@ impl Encoder for Codec {
 
     fn encode(&mut self, msg: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
         // Reserve enough space for the header, and then split into header and chunk.
+        buf.reserve(HEADER_SIZE);
         buf.put_slice(&[0u8; HEADER_SIZE]);
 
         // Write chunk data.

@@ -1,12 +1,13 @@
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
-use std::fmt;
+use std::process::{self, Command, Stdio};
+use std::fmt::Debug;
 
 use bytes::Bytes;
 use futures_cpupool::CpuPool;
-use futures::{stream, Future, Stream};
+use futures::{stream, Future, Stream, Sink};
 use futures::sync::mpsc;
+use tokio_core::reactor::Handle;
 
 lazy_static! {
     // Each member of this pool will be blocked reading one of stderr/stdout/exit for
@@ -25,26 +26,14 @@ pub struct Args {
     pub env: Vec<(String, String)>,
 }
 
-pub struct Child {
-    description: String,
-    stdout: Box<Stream<Item = Option<Vec<u8>>, Error = io::Error>>,
-    stderr: Box<Stream<Item = Option<Vec<u8>>, Error = io::Error>>,
-    exit: Box<Future<Item = ExitStatus, Error = io::Error>>,
-}
-
-impl fmt::Debug for Child {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Child")
-            .field("description", &self.description)
-            .finish()
-    }
-}
+#[derive(Debug)]
+pub struct Child(String);
 
 #[derive(Debug)]
 pub enum ChildOutput {
     Stdout(Bytes),
     Stderr(Bytes),
-    Exit(u8),
+    Exit(i32),
 }
 
 ///
@@ -54,8 +43,14 @@ pub fn child_channel() -> (mpsc::Sender<ChildOutput>, mpsc::Receiver<ChildOutput
     mpsc::channel(BUF_COUNT)
 }
 
-pub fn spawn(cmd: String, args: Args, working_dir: PathBuf) -> Result<Child, io::Error> {
-    Command::new(cmd)
+pub fn spawn<P: ProcessSink>(
+    cmd: String,
+    args: Args,
+    working_dir: PathBuf,
+    sink: P,
+    handle: &Handle,
+) -> Result<Child, io::Error> {
+    let mut child = Command::new(cmd)
         .args(args.args)
         .env_clear()
         .envs(args.env)
@@ -63,38 +58,74 @@ pub fn spawn(cmd: String, args: Args, working_dir: PathBuf) -> Result<Child, io:
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::piped())
-        .spawn()
-        .map(|mut child| {
-            let description = format!("{:?}", child);
-            let stdout = stream_for(child.stdout.take().unwrap());
-            let stderr = stream_for(child.stderr.take().unwrap());
-            let exit = Box::new(POOL.spawn_fn(move || child.wait()));
-            Child {
-                description,
-                stdout,
-                stderr,
-                exit,
-            }
-        })
+        .spawn()?;
+    let description = format!("{:?}", child);
+
+    let stdout_stream =
+        stream_for(child.stdout.take().unwrap()).map(|bytes| ChildOutput::Stdout(bytes.into()));
+    let stderr_stream =
+        stream_for(child.stderr.take().unwrap()).map(|bytes| ChildOutput::Stderr(bytes.into()));
+    let exit_stream = stream_for_exit(child).map(|exit_status| {
+        ChildOutput::Exit(exit_status.code().unwrap_or(1))
+    });
+
+    // Fully consume the stdout/stderr streams before waiting on the exit stream.
+    let stream = stdout_stream
+        .select(stderr_stream)
+        .chain(exit_stream);
+
+    handle.spawn(
+        sink.sink_map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Failed to send: {:?}", e))
+        }).send_all(stream)
+            .then(|_| Ok(())),
+    );
+    Ok(Child(description))
 }
 
 ///
-/// TODO: The `Option` in the stream is because we need an unfold that operates on Future<Option>
-/// rather than Option<Future>.
+/// A stream to read the given Read instance to completion.
 ///
 fn stream_for<R: Read + Send + Sized + 'static>(
     r: R,
-) -> Box<Stream<Item = Option<Vec<u8>>, Error = io::Error>> {
-    Box::new(stream::unfold(r, |mut pipe| {
-        Some(POOL.spawn_fn(move || {
-            let mut bytes = vec![0; BUF_SIZE];
-            match pipe.read(&mut bytes)? {
-                0 => Ok((None, pipe)),
-                read => {
-                    bytes.truncate(read);
-                    Ok((Some(bytes), pipe))
-                }
-            }
-        }))
+) -> Box<Stream<Item = Vec<u8>, Error = io::Error>> {
+    Box::new(stream::unfold(Some(r), |mut pipe_opt| {
+        pipe_opt.take().map(|mut pipe| {
+            POOL.spawn_fn(move || {
+                let mut bytes = vec![0; BUF_SIZE];
+                let read = pipe.read(&mut bytes)?;
+                bytes.truncate(read);
+                let next_state = if read == 0 { None } else { Some(pipe) };
+                Ok((bytes, next_state))
+            })
+        })
     }))
+}
+
+///
+/// A single item stream for the child's exit code.
+///
+fn stream_for_exit(
+    child: process::Child,
+) -> Box<Stream<Item = process::ExitStatus, Error = io::Error>> {
+    Box::new(stream::unfold(Some(child), |mut child_opt| {
+        child_opt.take().map(|mut child| {
+            POOL.spawn_fn(move || child.wait().map(|exit_status| (exit_status, None)))
+        })
+    }))
+}
+
+///
+///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
+///
+pub trait ProcessSink
+    : Debug + Sink<SinkItem = ChildOutput, SinkError = mpsc::SendError<ChildOutput>> + 'static
+    {
+}
+impl<T> ProcessSink for T
+where
+    T: Debug
+        + Sink<SinkItem = ChildOutput, SinkError = mpsc::SendError<ChildOutput>>
+        + 'static,
+{
 }

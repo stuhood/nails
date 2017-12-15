@@ -28,7 +28,7 @@ fn main() {
         println!("Got connection: {:?}", socket);
         let transport = socket.framed(Codec);
 
-        handle.spawn(proto::execute(transport).map_err(|_| ()));
+        handle.spawn(proto::execute(handle.clone(), transport).map_err(|_| ()));
 
         Ok(())
     });
