@@ -4,12 +4,13 @@ use std::io;
 use std::path::PathBuf;
 
 use futures::{future, Future, Stream, Sink};
+use futures::sync::mpsc;
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::codec::Framed;
 use tokio_core::reactor::Handle;
 
 use codec::{Codec, InputChunk, OutputChunk};
-use execution::{self, Args, Child, ChildOutput, child_channel, ProcessSink};
+use execution::{self, Args, ChildInput, ChildOutput, child_channel, ProcessSink, send_to_io};
 
 #[derive(Debug)]
 enum State<C: ClientSink, P: ProcessSink> {
@@ -19,9 +20,9 @@ enum State<C: ClientSink, P: ProcessSink> {
     // After the working directory has arrived, but before the command arrives.
     PreCommand(C, P, Args, PathBuf),
     // Executing, and able to receive stdin.
-    Executing(C, Child),
+    Executing(C, mpsc::Sender<ChildInput>),
     // Process has finished executing.
-    Exited,
+    Exited(i32),
 }
 
 #[derive(Debug)]
@@ -39,7 +40,7 @@ where
 {
     // Create a channel to consume process output from a forked subprocess, and split the client
     // transport into write and read portions.
-    let (process_write, process_read) = child_channel();
+    let (process_write, process_read) = child_channel::<ChildOutput>();
     let (client_write, client_read) = transport.split();
 
     // Select on the two input sources to create a merged Stream of events.
@@ -85,44 +86,45 @@ where
         (State::Initializing(c, p, args), Event::Client(InputChunk::WorkingDir(working_dir))) => {
             ok(State::PreCommand(c, p, args, working_dir))
         }
-        (State::PreCommand(client, process, args, working_dir),
+        (State::PreCommand(client, output_sink, args, working_dir),
          Event::Client(InputChunk::Command(cmd))) => {
-            Box::new(
-                future::result(execution::spawn(cmd, args, working_dir, process, handle))
-                    .then(move |res| match res {
-                        Ok(child) => {
-                            println!("Launched child as: {:?}", child);
-                            Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
-                                State::Executing(client, child)
-                            })) as LoopBox<_, _>
-                        }
-                        Err(e) => {
-                            // TODO: Send as stderr.
-                            println!("Failed to launch child: {:?}", e);
-                            Box::new(client.send(OutputChunk::Exit(1)).map(|_| State::Exited)) as
-                                LoopBox<_, _>
-                        }
-                    }),
-            )
+            let cmd_desc = cmd.clone();
+            let (stdin_tx, stdin_rx) = child_channel::<ChildInput>();
+            let spawn_res = execution::spawn(cmd, args, working_dir, output_sink, stdin_rx, handle);
+            Box::new(future::result(spawn_res).then(move |res| match res {
+                Ok(()) => {
+                    println!("Launched child {:?}", cmd_desc);
+                    Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
+                        State::Executing(client, stdin_tx)
+                    })) as LoopBox<_, _>
+                }
+                Err(e) => {
+                    // TODO: Send as stderr.
+                    println!("Failed to launch child: {:?}", e);
+                    let code = 1;
+                    Box::new(client.send(OutputChunk::Exit(code)).map(move |_| State::Exited(code))) as
+                        LoopBox<_, _>
+                }
+            }))
         }
-        (e @ State::Executing(..), Event::Client(InputChunk::Stdin(bytes))) => {
-            // TODO: Send stdin to process.
-            println!("Got stdin chunk: {:?}", bytes);
-            ok(e)
+        (State::Executing(client, child), Event::Client(InputChunk::Stdin(bytes))) => {
+            Box::new(child.send(ChildInput::Stdin(bytes)).map_err(send_to_io).map(|child| {
+                State::Executing(client, child)
+            })) as LoopBox<_, _>
         }
-        (e @ State::Executing(..), Event::Client(InputChunk::StdinEOF)) => {
-            // TODO: Enqueue stdin close to the child.
-            println!("Got stdin eof.");
-            ok(e)
+        (State::Executing(client, child), Event::Client(InputChunk::StdinEOF)) => {
+            Box::new(child.send(ChildInput::StdinEOF).map_err(send_to_io).map(|child| {
+                State::Executing(client, child)
+            })) as LoopBox<_, _>
         }
         (State::Executing(client, child), Event::Process(child_output)) => {
-            let exit = match child_output {
-                ChildOutput::Exit(_) => true,
-                _ => false,
+            let exit_code = match child_output {
+                ChildOutput::Exit(code) => Some(code),
+                _ => None,
             };
             Box::new(client.send(child_output.into()).map(
-                move |client| if exit {
-                    State::Exited
+                move |client| if let Some(code) = exit_code {
+                    State::Exited(code)
                 } else {
                     State::Executing(client, child)
                 },
@@ -163,11 +165,7 @@ type LoopBox<C, P> = Box<Future<Item = State<C, P>, Error = io::Error>>;
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
 ///
-trait ClientSink
-    : Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static {
-}
-impl<T> ClientSink for T
-where
-    T: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static,
-{
-}
+ #[cfg_attr(rustfmt, rustfmt_skip)]
+trait ClientSink: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static {}
+ #[cfg_attr(rustfmt, rustfmt_skip)]
+impl<T> ClientSink for T where T: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static {}
