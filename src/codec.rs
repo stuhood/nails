@@ -62,7 +62,10 @@ impl Decoder for Codec {
             b'C' => msg(InputChunk::Command(to_string(&chunk)?)),
             b'H' => msg(InputChunk::Heartbeat),
             b'0' => msg(InputChunk::Stdin(chunk.freeze())),
-            b'.' => msg(InputChunk::StdinEOF),
+            b'.' => {
+                println!("Saw StdinEOF in the codec.");
+                msg(InputChunk::StdinEOF)
+            }
             b => Err(err(&format!(
                 "Unrecognized chunk type: {} with len {}",
                 b as char,

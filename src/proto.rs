@@ -10,15 +10,15 @@ use tokio_io::codec::Framed;
 use tokio_core::reactor::Handle;
 
 use codec::{Codec, InputChunk, OutputChunk};
-use execution::{self, Args, ChildInput, ChildOutput, child_channel, ProcessSink, send_to_io};
+use execution::{self, Args, ChildInput, ChildOutput, child_channel, send_to_io};
 
 #[derive(Debug)]
-enum State<C: ClientSink, P: ProcessSink> {
+enum State<C: ClientSink> {
     // While we're gathering arguments and environment, but before the working directory has
     // arrived.
-    Initializing(C, P, Args),
+    Initializing(C, mpsc::Sender<ChildOutput>, Args),
     // After the working directory has arrived, but before the command arrives.
-    PreCommand(C, P, Args, PathBuf),
+    PreCommand(C, mpsc::Sender<ChildOutput>, Args, PathBuf),
     // Executing, and able to receive stdin.
     Executing(C, mpsc::Sender<ChildInput>),
     // Process has finished executing.
@@ -64,15 +64,11 @@ where
     )
 }
 
-fn step<C, P>(
+fn step<C: ClientSink>(
     handle: &Handle,
-    state: State<C, P>,
+    state: State<C>,
     ev: Event,
-) -> Box<Future<Item = State<C, P>, Error = io::Error>>
-where
-    C: ClientSink,
-    P: ProcessSink,
-{
+) -> Box<Future<Item = State<C>, Error = io::Error>> {
     match (state, ev) {
         (State::Initializing(c, p, mut args), Event::Client(InputChunk::Argument(arg))) => {
             args.args.push(arg);
@@ -96,39 +92,47 @@ where
                     println!("Launched child {:?}", cmd_desc);
                     Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
                         State::Executing(client, stdin_tx)
-                    })) as LoopBox<_, _>
+                    })) as LoopBox<_>
                 }
                 Err(e) => {
                     // TODO: Send as stderr.
                     println!("Failed to launch child: {:?}", e);
                     let code = 1;
-                    Box::new(client.send(OutputChunk::Exit(code)).map(move |_| State::Exited(code))) as
-                        LoopBox<_, _>
+                    Box::new(client.send(OutputChunk::Exit(code)).map(move |_| {
+                        State::Exited(code)
+                    })) as LoopBox<_>
                 }
             }))
         }
         (State::Executing(client, child), Event::Client(InputChunk::Stdin(bytes))) => {
-            Box::new(child.send(ChildInput::Stdin(bytes)).map_err(send_to_io).map(|child| {
-                State::Executing(client, child)
-            })) as LoopBox<_, _>
+            Box::new(
+                child
+                    .send(ChildInput::Stdin(bytes))
+                    .map_err(send_to_io)
+                    .map(|child| State::Executing(client, child)),
+            ) as LoopBox<_>
         }
         (State::Executing(client, child), Event::Client(InputChunk::StdinEOF)) => {
-            Box::new(child.send(ChildInput::StdinEOF).map_err(send_to_io).map(|child| {
-                State::Executing(client, child)
-            })) as LoopBox<_, _>
+            println!("Got stdineof over the wire.");
+            Box::new(child.send(ChildInput::StdinEOF).map_err(send_to_io).map(
+                |child| {
+                    println!("Sent stdin eof to the child.");
+                    State::Executing(client, child)
+                },
+            )) as LoopBox<_>
         }
         (State::Executing(client, child), Event::Process(child_output)) => {
             let exit_code = match child_output {
                 ChildOutput::Exit(code) => Some(code),
                 _ => None,
             };
-            Box::new(client.send(child_output.into()).map(
-                move |client| if let Some(code) = exit_code {
+            Box::new(client.send(child_output.into()).map(move |client| {
+                if let Some(code) = exit_code {
                     State::Exited(code)
                 } else {
                     State::Executing(client, child)
-                },
-            )) as LoopBox<_, _>
+                }
+            })) as LoopBox<_>
         }
         (s, Event::Client(InputChunk::Heartbeat)) => {
             // Not documented in the spec, but presumably always valid and ignored?
@@ -160,7 +164,7 @@ impl From<ChildOutput> for OutputChunk {
     }
 }
 
-type LoopBox<C, P> = Box<Future<Item = State<C, P>, Error = io::Error>>;
+type LoopBox<C> = Box<Future<Item = State<C>, Error = io::Error>>;
 
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4

@@ -55,17 +55,14 @@ fn unreachable_io() -> io::Error {
     unreachable!()
 }
 
-pub fn spawn<P: ProcessSink, H>(
+pub fn spawn(
     cmd: String,
     args: Args,
     working_dir: PathBuf,
-    output_sink: P,
-    input_stream: H,
+    output_sink: mpsc::Sender<ChildOutput>,
+    input_stream: mpsc::Receiver<ChildInput>,
     handle: &Handle,
-) -> Result<(), io::Error>
-where
-    H: Debug + Stream<Item = ChildInput, Error = ()> + 'static
-{
+) -> Result<(), io::Error> {
     let mut child = Command::new(cmd.clone())
         .args(args.args)
         .env_clear()
@@ -86,7 +83,7 @@ where
                         ChildInput::Stdin(bytes) => bytes,
                         ChildInput::StdinEOF => Bytes::new(),
                     })
-                    .map_err(|_| unreachable_io())
+                    .map_err(|_| unreachable_io()),
             )
             .then(|_| Ok(())),
     );
@@ -97,7 +94,9 @@ where
     let stderr_stream =
         stream_for(child.stderr.take().unwrap()).map(|bytes| ChildOutput::Stderr(bytes.into()));
     let exit_stream = stream_for_exit(child).map(|exit_status| {
-        ChildOutput::Exit(exit_status.code().unwrap_or_else(|| panic!("{:?}", exit_status)))
+        ChildOutput::Exit(exit_status.code().unwrap_or_else(
+            || panic!("{:?}", exit_status),
+        ))
     });
     let output_stream = stdout_stream.select(stderr_stream).chain(exit_stream);
 
@@ -114,7 +113,7 @@ where
 
 ///
 /// A stream to read the given Read instance to completion. The last item on the stream
-/// will be an empty Vec.
+/// will be an empty Bytes instance.
 ///
 fn stream_for<R: Read + Send + Sized + 'static>(
     r: R,
@@ -129,7 +128,11 @@ fn stream_for<R: Read + Send + Sized + 'static>(
                 }
                 let read = r.read(&mut buf)?;
                 let remainder = buf.split_off(read);
-                let next_state = if read == 0 { None } else { Some((r, remainder)) };
+                let next_state = if read == 0 {
+                    None
+                } else {
+                    Some((r, remainder))
+                };
                 Ok((buf.freeze(), next_state))
             })
         })
@@ -137,7 +140,7 @@ fn stream_for<R: Read + Send + Sized + 'static>(
 }
 
 ///
-/// A sink to write to the given Write instance.
+/// A sink to write to the given Write instance. An empty Bytes instance triggers close.
 ///
 fn sink_for<W: Write + Send + Sized + 'static>(
     w: W,
@@ -147,10 +150,23 @@ fn sink_for<W: Write + Send + Sized + 'static>(
     handle.spawn(
         stream
             .map_err(|_| unreachable_io())
-            .fold(w, |mut w, bytes| {
-                POOL.spawn_fn(move || {
-                    w.write_all(&bytes)?;
-                    Ok(w)
+            .fold(Some(w), |w, bytes| {
+                POOL.spawn_fn(move || match (w, bytes.len()) {
+                    (_, 0) => {
+                        println!("Got empty input: dropping stdin.");
+                        Ok(None)
+                    }
+                    (Some(mut w), _) => {
+                        w.write_all(&bytes)?;
+                        Ok(Some(w))
+                    }
+                    (None, _) => {
+                        // TODO: This should probably be a protocol state.
+                        Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "stdin is already closed.",
+                        ))
+                    }
                 }) as CpuFuture<_, io::Error>
             })
             .then(|_| Ok(())),
@@ -170,11 +186,3 @@ fn stream_for_exit(
         })
     }))
 }
-
-///
-///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
-///
- #[cfg_attr(rustfmt, rustfmt_skip)]
-pub trait ProcessSink: Debug + Sink<SinkItem = ChildOutput, SinkError = mpsc::SendError<ChildOutput>> + 'static {}
- #[cfg_attr(rustfmt, rustfmt_skip)]
-impl<T> ProcessSink for T where T: Debug + Sink<SinkItem = ChildOutput, SinkError = mpsc::SendError<ChildOutput>> + 'static {}
