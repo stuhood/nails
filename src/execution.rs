@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use std::io::{self, BufReader};
+use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -9,7 +9,7 @@ use futures::sync::mpsc;
 use tokio_core::reactor::Handle;
 use tokio_io::{self, AsyncRead, AsyncWrite};
 use tokio_process::CommandExt;
-use tokio_io::codec::Encoder;
+use tokio_io::codec::{Decoder, Encoder};
 
 const BUF_COUNT: usize = 128;
 
@@ -104,10 +104,10 @@ pub fn spawn(
     Ok(())
 }
 
-fn stream_for<R: AsyncRead + Send + Sized + 'static>(r: R) -> tokio_io::io::Lines<BufReader<R>> {
-    // TODO: Should switch this to a Codec which emits for either lines or elapsed time.
-    // TODO: This is stripping newlines.
-    tokio_io::io::lines(io::BufReader::new(r))
+fn stream_for<R: AsyncRead + Send + Sized + 'static>(
+    r: R,
+) -> tokio_io::codec::FramedRead<R, IdentityCodec> {
+    tokio_io::codec::FramedRead::new(r, IdentityCodec)
 }
 
 fn sink_for<W: AsyncWrite + Send + Sized + 'static>(
@@ -116,14 +116,30 @@ fn sink_for<W: AsyncWrite + Send + Sized + 'static>(
     tokio_io::codec::FramedWrite::new(w, IdentityCodec)
 }
 
+// TODO: Should switch this to a Codec which emits for either lines or elapsed time.
 struct IdentityCodec;
+
+impl Decoder for IdentityCodec {
+    type Item = Bytes;
+    type Error = io::Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if buf.len() == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(buf.take().freeze()))
+        }
+    }
+}
 
 impl Encoder for IdentityCodec {
     type Item = Bytes;
     type Error = io::Error;
 
     fn encode(&mut self, item: Bytes, buf: &mut BytesMut) -> Result<(), io::Error> {
-        buf.extend(item);
+        if item.len() > 0 {
+            buf.extend(item);
+        }
         Ok(())
     }
 }

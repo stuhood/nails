@@ -24,6 +24,8 @@ fn main() {
     println!("Bound listener: {:?}", listener);
     let server = listener.incoming().for_each(move |(socket, _)| {
         println!("Got connection: {:?}", socket);
+        socket.set_nodelay(true)?;
+
         let transport = socket.framed(Codec);
         let config = proto::Config { noisy_stdin: true };
 
