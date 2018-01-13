@@ -1,0 +1,9 @@
+[package]
+name = "nails-example"
+version = "0.1.0"
+authors = ["Stu Hood <stuhood@gmail.com>"]
+
+[dependencies]
+nails = { path = "../nails" }
+futures = "0.1"
+tokio-core = "0.1"

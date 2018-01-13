@@ -1,7 +1,7 @@
 [package]
 name = "nails"
 version = "0.1.0"
-authors = ["Stu Hood <stuhood@twitter.com>"]
+authors = ["Stu Hood <stuhood@gmail.com>"]
 
 [dependencies]
 bytes = "0.4"

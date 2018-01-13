@@ -31,14 +31,11 @@ enum Event {
     Process(ChildOutput),
 }
 
-pub struct Config {
-    /// Although it is no part of the spec, the Python and C clients require that
-    /// `StartReadingStdin` is sent after every stdin chunk has been consumed.
-    ///   see https://github.com/facebook/nailgun/issues/88
-    pub noisy_stdin: bool,
-}
-
-pub fn execute<T>(handle: Handle, transport: Framed<T, Codec>, config: Config) -> IOFuture<()>
+pub fn execute<T>(
+    handle: Handle,
+    transport: Framed<T, Codec>,
+    config: &'static super::Config,
+) -> IOFuture<()>
 where
     T: AsyncRead + AsyncWrite + Debug + 'static,
 {
@@ -70,7 +67,7 @@ where
 
 fn step<C: ClientSink>(
     handle: &Handle,
-    config: &Config,
+    config: &'static super::Config,
     state: State<C>,
     ev: Event,
 ) -> IOFuture<State<C>> {
