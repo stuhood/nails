@@ -58,10 +58,7 @@ where
                 State::Initializing(client_write, process_write, Default::default()),
                 move |state, ev| step(&handle, &config, state, ev),
             )
-            .then(|e| {
-                println!("Connection finished in state {:?}", e);
-                Ok(())
-            }),
+            .then(|_| Ok(())),
     )
 }
 
@@ -91,18 +88,23 @@ fn step<C: ClientSink>(
             let spawn_res = execution::spawn(cmd, args, working_dir, output_sink, stdin_rx, handle);
             Box::new(future::result(spawn_res).then(move |res| match res {
                 Ok(()) => {
-                    println!("Launched child {:?}", cmd_desc);
                     Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
                         State::Executing(client, stdin_tx)
                     })) as LoopFuture<_>
                 }
                 Err(e) => {
-                    // TODO: Send as stderr.
-                    println!("Failed to launch child: {:?}", e);
-                    let code = 1;
-                    Box::new(client.send(OutputChunk::Exit(code)).map(move |_| {
-                        State::Exited(code)
-                    })) as LoopFuture<_>
+                    Box::new(
+                        client
+                            .send(OutputChunk::Stderr(
+                                format!("Failed to launch child `{}`: {:?}\n", cmd_desc, e)
+                                    .into(),
+                            ))
+                            .and_then(move |client| client.send(OutputChunk::Exit(1)))
+                            .map(|_| {
+                                // Drop the client and exit.
+                                State::Exited(1)
+                            }),
+                    ) as LoopFuture<_>
                 }
             }))
         }

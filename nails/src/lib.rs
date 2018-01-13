@@ -28,7 +28,6 @@ pub fn handle_connection(
     handle: &Handle,
     socket: TcpStream,
 ) -> Result<(), io::Error> {
-    println!("Got connection: {:?}", socket);
     socket.set_nodelay(true)?;
 
     handle.spawn(

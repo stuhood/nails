@@ -18,6 +18,7 @@ fn main() {
     let listener = TcpListener::bind(&remote_addr, &handle).unwrap();
     println!("Bound listener: {:?}", listener);
     let server = listener.incoming().for_each(|(socket, _)| {
+        println!("Got connection: {:?}", socket);
         nails::handle_connection(&FORK_CONFIG, &handle, socket)
     });
 
