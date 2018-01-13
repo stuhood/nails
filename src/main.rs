@@ -1,10 +1,8 @@
 extern crate bytes;
 extern crate futures;
-extern crate futures_cpupool;
-#[macro_use]
-extern crate lazy_static;
-extern crate tokio_io;
 extern crate tokio_core;
+extern crate tokio_io;
+extern crate tokio_process;
 
 mod execution;
 mod codec;

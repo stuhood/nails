@@ -1,25 +1,17 @@
-use std::io::{self, Read, Write};
-use std::path::PathBuf;
-use std::process::{self, Command, Stdio};
 use std::fmt::Debug;
+use std::io::{self, BufReader};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use futures_cpupool::{CpuFuture, CpuPool};
-use futures::{stream, Future, Stream, Sink};
+use futures::{Future, Stream, Sink};
 use futures::sync::mpsc;
 use tokio_core::reactor::Handle;
+use tokio_io::{self, AsyncRead, AsyncWrite};
+use tokio_process::CommandExt;
+use tokio_io::codec::Encoder;
 
-lazy_static! {
-    // Each member of this pool will be blocked reading one of stderr/stdout/exit for
-    // a child process.
-    // TODO: Should really be unbounded, or not a pool.
-    static ref POOL: CpuPool = CpuPool::new(16);
-}
-
-// Total memory usage per channel should be BUF_SIZE * BUF_COUNT.
-const BUF_SIZE: usize = 4096;
 const BUF_COUNT: usize = 128;
-const BUF_TOTAL: usize = BUF_SIZE * BUF_COUNT;
 
 #[derive(Debug, Default)]
 pub struct Args {
@@ -71,17 +63,20 @@ pub fn spawn(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::piped())
-        .spawn()?;
-
+        .spawn_async(handle)?;
 
     // Copy inputs to the child.
     handle.spawn(
-        sink_for(child.stdin.take().unwrap(), handle)
+        sink_for(child.stdin().take().unwrap())
             .send_all(
                 input_stream
+                    .take_while(|child_input| match child_input {
+                        &ChildInput::Stdin(_) => Ok(true),
+                        &ChildInput::StdinEOF => Ok(false),
+                    })
                     .map(|child_input| match child_input {
                         ChildInput::Stdin(bytes) => bytes,
-                        ChildInput::StdinEOF => Bytes::new(),
+                        ChildInput::StdinEOF => unreachable!(),
                     })
                     .map_err(|_| unreachable_io()),
             )
@@ -90,13 +85,11 @@ pub fn spawn(
 
     // Fully consume the stdout/stderr streams before waiting on the exit stream.
     let stdout_stream =
-        stream_for(child.stdout.take().unwrap()).map(|bytes| ChildOutput::Stdout(bytes.into()));
+        stream_for(child.stdout().take().unwrap()).map(|bytes| ChildOutput::Stdout(bytes.into()));
     let stderr_stream =
-        stream_for(child.stderr.take().unwrap()).map(|bytes| ChildOutput::Stderr(bytes.into()));
-    let exit_stream = stream_for_exit(child).map(|exit_status| {
-        ChildOutput::Exit(exit_status.code().unwrap_or_else(
-            || panic!("{:?}", exit_status),
-        ))
+        stream_for(child.stderr().take().unwrap()).map(|bytes| ChildOutput::Stderr(bytes.into()));
+    let exit_stream = child.into_stream().map(|exit_status| {
+        ChildOutput::Exit(exit_status.code().unwrap_or(-1))
     });
     let output_stream = stdout_stream.select(stderr_stream).chain(exit_stream);
 
@@ -111,78 +104,25 @@ pub fn spawn(
     Ok(())
 }
 
-///
-/// A stream to read the given Read instance to completion. The last item on the stream
-/// will be an empty Bytes instance.
-///
-fn stream_for<R: Read + Send + Sized + 'static>(
-    r: R,
-) -> Box<Stream<Item = Bytes, Error = io::Error>> {
-    Box::new(stream::unfold(Some((r, BytesMut::new())), |mut r_opt| {
-        r_opt.take().map(|(mut r, mut buf)| {
-            POOL.spawn_fn(move || {
-                if buf.len() < BUF_SIZE {
-                    // Allocate and zero a buffer which we will consume to give away.
-                    buf = BytesMut::with_capacity(BUF_TOTAL);
-                    buf.put_slice(&[0; BUF_TOTAL]);
-                }
-                let read = r.read(&mut buf)?;
-                let remainder = buf.split_off(read);
-                let next_state = if read == 0 {
-                    None
-                } else {
-                    Some((r, remainder))
-                };
-                Ok((buf.freeze(), next_state))
-            })
-        })
-    }))
+fn stream_for<R: AsyncRead + Send + Sized + 'static>(r: R) -> tokio_io::io::Lines<BufReader<R>> {
+    // TODO: Should switch this to a Codec which emits for either lines or elapsed time.
+    tokio_io::io::lines(io::BufReader::new(r))
 }
 
-///
-/// A sink to write to the given Write instance. An empty Bytes instance triggers close.
-///
-fn sink_for<W: Write + Send + Sized + 'static>(
+fn sink_for<W: AsyncWrite + Send + Sized + 'static>(
     w: W,
-    handle: &Handle,
-) -> Box<Sink<SinkItem = Bytes, SinkError = io::Error>> {
-    let (sink, stream) = mpsc::channel::<Bytes>(BUF_COUNT);
-    handle.spawn(
-        stream
-            .map_err(|_| unreachable_io())
-            .fold(Some(w), |w, bytes| {
-                POOL.spawn_fn(move || match (w, bytes.len()) {
-                    (_, 0) => {
-                        println!("Got empty input: dropping stdin.");
-                        Ok(None)
-                    }
-                    (Some(mut w), _) => {
-                        w.write_all(&bytes)?;
-                        Ok(Some(w))
-                    }
-                    (None, _) => {
-                        // TODO: This should probably be a protocol state.
-                        Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            "stdin is already closed.",
-                        ))
-                    }
-                }) as CpuFuture<_, io::Error>
-            })
-            .then(|_| Ok(())),
-    );
-    Box::new(sink.sink_map_err(send_to_io))
+) -> tokio_io::codec::FramedWrite<W, IdentityCodec> {
+    tokio_io::codec::FramedWrite::new(w, IdentityCodec)
 }
 
-///
-/// A single item stream for the child's exit code.
-///
-fn stream_for_exit(
-    child: process::Child,
-) -> Box<Stream<Item = process::ExitStatus, Error = io::Error>> {
-    Box::new(stream::unfold(Some(child), |mut child_opt| {
-        child_opt.take().map(|mut child| {
-            POOL.spawn_fn(move || child.wait().map(|exit_status| (exit_status, None)))
-        })
-    }))
+struct IdentityCodec;
+
+impl Encoder for IdentityCodec {
+    type Item = Bytes;
+    type Error = io::Error;
+
+    fn encode(&mut self, item: Bytes, buf: &mut BytesMut) -> Result<(), io::Error> {
+        buf.put(item);
+        Ok(())
+    }
 }
