@@ -25,8 +25,11 @@ fn main() {
     let server = listener.incoming().for_each(move |(socket, _)| {
         println!("Got connection: {:?}", socket);
         let transport = socket.framed(Codec);
+        let config = proto::Config { noisy_stdin: true };
 
-        handle.spawn(proto::execute(handle.clone(), transport).map_err(|_| ()));
+        handle.spawn(proto::execute(handle.clone(), transport, config).map_err(
+            |_| (),
+        ));
 
         Ok(())
     });

@@ -3,7 +3,7 @@ use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use futures::{Future, Stream, Sink};
 use futures::sync::mpsc;
 use tokio_core::reactor::Handle;
@@ -106,6 +106,7 @@ pub fn spawn(
 
 fn stream_for<R: AsyncRead + Send + Sized + 'static>(r: R) -> tokio_io::io::Lines<BufReader<R>> {
     // TODO: Should switch this to a Codec which emits for either lines or elapsed time.
+    // TODO: This is stripping newlines.
     tokio_io::io::lines(io::BufReader::new(r))
 }
 
@@ -122,7 +123,7 @@ impl Encoder for IdentityCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Bytes, buf: &mut BytesMut) -> Result<(), io::Error> {
-        buf.put(item);
+        buf.extend(item);
         Ok(())
     }
 }

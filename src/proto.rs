@@ -31,10 +31,14 @@ enum Event {
     Process(ChildOutput),
 }
 
-pub fn execute<T>(
-    handle: Handle,
-    transport: Framed<T, Codec>,
-) -> Box<Future<Item = (), Error = io::Error>>
+pub struct Config {
+    /// Although it is no part of the spec, the Python and C clients require that
+    /// `StartReadingStdin` is sent after every stdin chunk has been consumed.
+    ///   see https://github.com/facebook/nailgun/issues/88
+    pub noisy_stdin: bool,
+}
+
+pub fn execute<T>(handle: Handle, transport: Framed<T, Codec>, config: Config) -> IOFuture<()>
 where
     T: AsyncRead + AsyncWrite + Debug + 'static,
 {
@@ -55,7 +59,7 @@ where
         events_read
             .fold(
                 State::Initializing(client_write, process_write, Default::default()),
-                move |state, ev| step(&handle, state, ev),
+                move |state, ev| step(&handle, &config, state, ev),
             )
             .then(|e| {
                 println!("Connection finished in state {:?}", e);
@@ -66,9 +70,10 @@ where
 
 fn step<C: ClientSink>(
     handle: &Handle,
+    config: &Config,
     state: State<C>,
     ev: Event,
-) -> Box<Future<Item = State<C>, Error = io::Error>> {
+) -> IOFuture<State<C>> {
     match (state, ev) {
         (State::Initializing(c, p, mut args), Event::Client(InputChunk::Argument(arg))) => {
             args.args.push(arg);
@@ -92,7 +97,7 @@ fn step<C: ClientSink>(
                     println!("Launched child {:?}", cmd_desc);
                     Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
                         State::Executing(client, stdin_tx)
-                    })) as LoopBox<_>
+                    })) as LoopFuture<_>
                 }
                 Err(e) => {
                     // TODO: Send as stderr.
@@ -100,26 +105,31 @@ fn step<C: ClientSink>(
                     let code = 1;
                     Box::new(client.send(OutputChunk::Exit(code)).map(move |_| {
                         State::Exited(code)
-                    })) as LoopBox<_>
+                    })) as LoopFuture<_>
                 }
             }))
         }
         (State::Executing(client, child), Event::Client(InputChunk::Stdin(bytes))) => {
+            let noisy_stdin = config.noisy_stdin;
             Box::new(
                 child
                     .send(ChildInput::Stdin(bytes))
                     .map_err(send_to_io)
-                    .map(|child| State::Executing(client, child)),
-            ) as LoopBox<_>
+                    .and_then(move |child| {
+                        // If noisy_stdin is configured, respond with `StartReadingStdin`.
+                        let respond: IOFuture<C> = if noisy_stdin {
+                            Box::new(client.send(OutputChunk::StartReadingStdin)) as IOFuture<C>
+                        } else {
+                            Box::new(future::ok::<_, io::Error>(client)) as IOFuture<C>
+                        };
+                        respond.map(|client| State::Executing(client, child))
+                    }),
+            ) as LoopFuture<_>
         }
         (State::Executing(client, child), Event::Client(InputChunk::StdinEOF)) => {
-            println!("Got stdineof over the wire.");
             Box::new(child.send(ChildInput::StdinEOF).map_err(send_to_io).map(
-                |child| {
-                    println!("Sent stdin eof to the child.");
-                    State::Executing(client, child)
-                },
-            )) as LoopBox<_>
+                |child| State::Executing(client, child),
+            )) as LoopFuture<_>
         }
         (State::Executing(client, child), Event::Process(child_output)) => {
             let exit_code = match child_output {
@@ -132,7 +142,7 @@ fn step<C: ClientSink>(
                 } else {
                     State::Executing(client, child)
                 }
-            })) as LoopBox<_>
+            })) as LoopFuture<_>
         }
         (s, Event::Client(InputChunk::Heartbeat)) => {
             // Not documented in the spec, but presumably always valid and ignored?
@@ -146,7 +156,7 @@ fn step<C: ClientSink>(
     }
 }
 
-fn ok<T: 'static>(t: T) -> Box<Future<Item = T, Error = io::Error>> {
+fn ok<T: 'static>(t: T) -> IOFuture<T> {
     Box::new(future::ok(t))
 }
 
@@ -164,7 +174,9 @@ impl From<ChildOutput> for OutputChunk {
     }
 }
 
-type LoopBox<C> = Box<Future<Item = State<C>, Error = io::Error>>;
+type LoopFuture<C> = IOFuture<State<C>>;
+
+type IOFuture<T> = Box<Future<Item = T, Error = io::Error>>;
 
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
