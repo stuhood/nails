@@ -1,10 +1,12 @@
 [package]
-name = "nails-example"
+name = "nails-fork"
 version = "0.1.0"
 authors = ["Stu Hood <stuhood@gmail.com>"]
 
 [dependencies]
 nails = { path = "../nails" }
-nails-fork = { path = "../nails-fork" }
+bytes = "0.4"
 futures = "0.1"
 tokio-core = "0.1"
+tokio-io = "0.1"
+tokio-process = "0.1"

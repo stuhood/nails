@@ -4,27 +4,61 @@ extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_process;
 
-mod execution;
+pub mod execution;
 mod codec;
 mod proto;
 
 use std::io;
+use std::path::PathBuf;
 use futures::Future;
+use futures::sync::mpsc;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
 use tokio_io::AsyncRead;
 
 use codec::Codec;
+use execution::{Args, ChildInput, ChildOutput};
 
-pub struct Config {
-    /// Although it is no part of the spec, the Python and C clients require that
-    /// `StartReadingStdin` is sent after every stdin chunk has been consumed.
-    ///   see https://github.com/facebook/nailgun/issues/88
-    pub noisy_stdin: bool,
+#[derive(Clone)]
+pub struct Config<N: Nail> {
+    nail: N,
+    noisy_stdin: bool,
 }
 
-pub fn handle_connection(
-    config: &'static Config,
+impl<N> Config<N>
+where
+    N: Nail,
+{
+    pub fn new(nail: N) -> Config<N> {
+        Config {
+            nail,
+            noisy_stdin: true,
+        }
+    }
+
+    /// Although it is not part of the spec, the Python and C clients require that
+    /// `StartReadingStdin` is sent after every stdin chunk has been consumed.
+    ///   see https://github.com/facebook/nailgun/issues/88
+    pub fn noisy_stdin(mut self, value: bool) -> Self {
+        self.noisy_stdin = value;
+        self
+    }
+}
+
+pub trait Nail: Clone + Send + Sync + 'static {
+    fn spawn(
+        &self,
+        cmd: String,
+        args: Args,
+        working_dir: PathBuf,
+        output_sink: mpsc::Sender<ChildOutput>,
+        input_stream: mpsc::Receiver<ChildInput>,
+        handle: &Handle,
+    ) -> Result<(), io::Error>;
+}
+
+pub fn handle_connection<N: Nail>(
+    config: Config<N>,
     handle: &Handle,
     socket: TcpStream,
 ) -> Result<(), io::Error> {

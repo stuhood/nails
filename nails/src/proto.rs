@@ -10,7 +10,7 @@ use tokio_io::codec::Framed;
 use tokio_core::reactor::Handle;
 
 use codec::{Codec, InputChunk, OutputChunk};
-use execution::{self, Args, ChildInput, ChildOutput, child_channel, send_to_io};
+use execution::{Args, ChildInput, ChildOutput, child_channel, send_to_io};
 
 #[derive(Debug)]
 enum State<C: ClientSink> {
@@ -31,13 +31,14 @@ enum Event {
     Process(ChildOutput),
 }
 
-pub fn execute<T>(
+pub fn execute<T, N>(
     handle: Handle,
     transport: Framed<T, Codec>,
-    config: &'static super::Config,
+    config: super::Config<N>,
 ) -> IOFuture<()>
 where
     T: AsyncRead + AsyncWrite + Debug + 'static,
+    N: super::Nail,
 {
     // Create a channel to consume process output from a forked subprocess, and split the client
     // transport into write and read portions.
@@ -62,9 +63,9 @@ where
     )
 }
 
-fn step<C: ClientSink>(
+fn step<C: ClientSink, N: super::Nail>(
     handle: &Handle,
-    config: &'static super::Config,
+    config: &super::Config<N>,
     state: State<C>,
     ev: Event,
 ) -> IOFuture<State<C>> {
@@ -85,7 +86,14 @@ fn step<C: ClientSink>(
          Event::Client(InputChunk::Command(cmd))) => {
             let cmd_desc = cmd.clone();
             let (stdin_tx, stdin_rx) = child_channel::<ChildInput>();
-            let spawn_res = execution::spawn(cmd, args, working_dir, output_sink, stdin_rx, handle);
+            let spawn_res = config.nail.spawn(
+                cmd,
+                args,
+                working_dir,
+                output_sink,
+                stdin_rx,
+                handle,
+            );
             Box::new(future::result(spawn_res).then(move |res| match res {
                 Ok(()) => {
                     Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
