@@ -108,8 +108,6 @@ impl Encoder for Codec {
 }
 
 fn msg<T>(message: T) -> Result<Option<T>, io::Error> {
-    // We're using the tokio `streaming` pattern, but without bodies: all messages are
-    // chunked to be small enough to fully decode.
     Ok(Some(message))
 }
 

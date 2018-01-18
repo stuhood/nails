@@ -124,7 +124,7 @@ fn step<C: ClientSink, N: super::Nail>(
                     .map_err(send_to_io)
                     .and_then(move |child| {
                         // If noisy_stdin is configured, respond with `StartReadingStdin`.
-                        let respond: IOFuture<C> = if noisy_stdin {
+                        let respond = if noisy_stdin {
                             Box::new(client.send(OutputChunk::StartReadingStdin)) as IOFuture<C>
                         } else {
                             Box::new(future::ok::<_, io::Error>(client)) as IOFuture<C>
