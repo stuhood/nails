@@ -1,8 +1,8 @@
 extern crate nails;
 extern crate nails_fork;
 
-extern crate tokio_core;
 extern crate futures;
+extern crate tokio_core;
 
 use futures::Stream;
 use tokio_core::net::TcpListener;

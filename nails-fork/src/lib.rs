@@ -13,9 +13,9 @@ use bytes::{Bytes, BytesMut};
 use futures::{Future, Stream, Sink};
 use futures::sync::mpsc;
 use tokio_core::reactor::Handle;
+use tokio_io::codec::{Decoder, Encoder};
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_process::CommandExt;
-use tokio_io::codec::{Decoder, Encoder};
 
 use nails::Nail;
 use nails::execution::{Args, ChildInput, ChildOutput, send_to_io, unreachable_io};
