@@ -4,7 +4,7 @@ A [nailgun protocol](http://martiansoftware.com/nailgun/protocol.html) server in
 
 This repository contains three crates:
 
-1.`nails` - contains the nailgun protocol and the `Nail` trait that consuming crates can implement to plug in the logic that they would like to keep warm in the nailgun server.
+1. `nails` - contains the nailgun protocol and the `Nail` trait that consuming crates can implement to plug in the logic that they would like to keep warm in the nailgun server.
 2. `nails-fork` - contains a `Nail` trait implementation that forks a process as the user running the server.
 3. `nails-example` - an example binary that configures and launches a server using `nails-fork`.
 
