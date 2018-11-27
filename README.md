@@ -8,4 +8,4 @@ This repository contains three crates:
 2. `nails-fork` - contains a `Nail` trait implementation that forks a process as the user running the server.
 3. `nails-example` - an example binary that configures and launches a server using `nails-fork`.
 
-Users will generally want to use consume the `nails` crate, but copy-pasting the `nails-fork` crate is helpful to bootstrap your own new `Nail` trait implementation.
+Users will generally want to consume the `nails` crate, but copy-pasting the `nails-fork` crate is helpful to bootstrap your own new `Nail` trait implementation.
