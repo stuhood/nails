@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+    "nails",
+    "nails-client",
+    "nails-example",
+    "nails-fork",
+]
