@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "nails"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes 0.4.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.29 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -268,32 +268,32 @@ dependencies = [
 
 [[package]]
 name = "nails-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "env_logger 0.5.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.29 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "nails 0.1.0",
+ "nails 0.2.0",
  "tokio-core 0.1.17 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "nails-example"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures 0.1.29 (registry+https://github.com/rust-lang/crates.io-index)",
- "nails 0.1.0",
- "nails-fork 0.1.0",
+ "nails 0.2.0",
+ "nails-fork 0.2.0",
  "tokio-core 0.1.17 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "nails-fork"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes 0.4.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.29 (registry+https://github.com/rust-lang/crates.io-index)",
- "nails 0.1.0",
+ "nails 0.2.0",
  "tokio-codec 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-core 0.1.17 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-io 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)",
