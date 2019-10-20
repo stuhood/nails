@@ -2,6 +2,15 @@
 name = "nails"
 version = "0.1.0"
 authors = ["Stu Hood <stuhood@gmail.com>"]
+license = "Apache-2.0"
+readme = "../README.md"
+repository = "https://github.com/stuhood/nails"
+homepage = "https://github.com/stuhood/nails"
+description = """
+[Nailgun](http://martiansoftware.com/nailgun/protocol.html) client and server protocols and a `Nail`
+trait that consuming crates can implement to plug in the logic that they would like to keep warm in
+a nailgun server.
+"""
 
 [dependencies]
 bytes = "0.4"

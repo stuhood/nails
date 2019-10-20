@@ -2,10 +2,17 @@
 name = "nails-client"
 version = "0.1.0"
 authors = ["Stu Hood <stuhood@gmail.com>"]
+license = "Apache-2.0"
+readme = "../README.md"
+repository = "https://github.com/stuhood/nails"
+homepage = "https://github.com/stuhood/nails"
+description = """
+A Nailgun client binary, intended to be equivalent to the C and Python clients.
+"""
 
 [dependencies]
 env_logger = "0.5.4"
 futures = "0.1"
 log = "0.4"
-nails = { path = "../nails" }
+nails = { path = "../nails", version = "=0.1.0" }
 tokio-core = "0.1"
