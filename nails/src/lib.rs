@@ -73,12 +73,19 @@ pub fn server_handle_connection<N: Nail>(
 pub fn client_handle_connection(
     socket: TcpStream,
     cmd: Command,
+    output_sink: mpsc::Sender<ChildOutput>,
+    input_stream: mpsc::Receiver<ChildInput>,
 ) -> Box<dyn Future<Item = ExitCode, Error = io::Error>> {
     if let Err(e) = socket.set_nodelay(true) {
         return Box::new(future::err(e));
     };
 
-    Box::new(client_proto::execute(ClientCodec.framed(socket), cmd))
+    Box::new(client_proto::execute(
+        ClientCodec.framed(socket),
+        cmd,
+        output_sink,
+        input_stream,
+    ))
 }
 
 #[cfg(test)]
@@ -88,7 +95,7 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
-    use execution::{ChildInput, ChildOutput, Command, ExitCode};
+    use execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
     use futures::sync::mpsc;
     use futures::{Future, Sink, Stream};
     use tokio_core::net::{TcpListener, TcpStream};
@@ -125,10 +132,14 @@ mod tests {
             env: vec![],
             working_dir: PathBuf::from("/dev/null"),
         };
+        let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
+        let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
         let exit_code = core
             .run(
                 TcpStream::connect(&addr, &handle)
-                    .and_then(|stream| client_handle_connection(stream, cmd))
+                    .and_then(|stream| {
+                        client_handle_connection(stream, cmd, stdio_write, stdin_read)
+                    })
                     .map_err(|e| format!("Error communicating with server: {}", e)),
             )
             .unwrap();

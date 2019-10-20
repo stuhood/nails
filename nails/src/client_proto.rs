@@ -1,29 +1,23 @@
 use std::fmt::Debug;
-use std::io::{self, Write};
+use std::io;
 
-use bytes::Bytes;
+use futures::sync::mpsc;
 use futures::{future, Future, Sink, Stream};
 use log::debug;
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
 
 use codec::{ClientCodec, InputChunk, OutputChunk};
-use execution::{Command, ExitCode};
+use execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
 
 #[derive(Debug)]
 enum Event {
     Server(OutputChunk),
-    Cli(CliEvent),
+    Cli(ChildInput),
 }
 
 #[derive(Debug)]
-enum CliEvent {
-    Stdin(Bytes),
-    StdinEOF,
-}
-
-#[derive(Debug)]
-struct ClientState<S: ServerSink>(S);
+struct ClientState<S: ServerSink>(S, mpsc::Sender<ChildOutput>);
 
 ///
 /// Exiting via an exit code is an error condition, but we can only exit a `fold` via an error.
@@ -60,6 +54,8 @@ fn command_as_chunks(cmd: Command) -> Vec<InputChunk> {
 pub fn execute<T>(
     transport: Framed<T, ClientCodec>,
     cmd: Command,
+    output_sink: mpsc::Sender<ChildOutput>,
+    input_stream: mpsc::Receiver<ChildInput>,
 ) -> Box<Future<Item = ExitCode, Error = io::Error>>
 where
     T: AsyncRead + AsyncWrite + Debug + 'static,
@@ -71,8 +67,7 @@ where
         .inspect(|i| debug!("Client sending initialization chunk {:?}", i));
 
     // Select on the two input sources to create a merged Stream of events.
-    // TODO: Handle stdin with this `select`.
-    let events_read = futures::stream::empty::<CliEvent, io::Error>()
+    let events_read = input_stream
         .then(|res| match res {
             Ok(v) => Ok(Event::Cli(v)),
             Err(e) => Err(err(&format!("Failed to emit child output: {:?}", e))),
@@ -95,7 +90,9 @@ where
             .and_then(|sink_and_stream| {
                 let (server_write, _) = sink_and_stream;
                 events_read
-                    .fold(ClientState(server_write), move |state, ev| step(state, ev))
+                    .fold(ClientState(server_write, output_sink), move |state, ev| {
+                        step(state, ev)
+                    })
                     .then(|res| match res {
                         Err(ClientError::Clean(code)) => Ok(code),
                         Ok(_) => Err(io_err(
@@ -109,45 +106,47 @@ where
 
 fn step<C: ServerSink>(state: ClientState<C>, ev: Event) -> ClientFuture<C> {
     match (state, ev) {
-        // TODO This blocks because it uses std::io, we should switch it to tokio::io
-        (state, Event::Server(OutputChunk::Stderr(bytes))) => {
+        (ClientState(server, cli), Event::Server(OutputChunk::Stderr(bytes))) => {
             debug!("Client got {} bytes of stderr.", bytes.len());
-            Box::new(future::result(
-                io::stderr()
-                    .write_all(&bytes)
-                    .map_err(ClientError::Dirty)
-                    .map(|()| state),
-            ))
+            Box::new(
+                cli.send(ChildOutput::Stderr(bytes))
+                    .map_err(|e| ClientError::Dirty(send_to_io(e)))
+                    .map(|cli| ClientState(server, cli)),
+            )
         }
-        (state, Event::Server(OutputChunk::Stdout(bytes))) => {
+        (ClientState(server, cli), Event::Server(OutputChunk::Stdout(bytes))) => {
             debug!("Client got {} bytes of stdout.", bytes.len());
-            Box::new(future::result(
-                io::stdout()
-                    .write_all(&bytes)
-                    .map_err(ClientError::Dirty)
-                    .map(|()| state),
-            ))
+            Box::new(
+                cli.send(ChildOutput::Stdout(bytes))
+                    .map_err(|e| ClientError::Dirty(send_to_io(e)))
+                    .map(|cli| ClientState(server, cli)),
+            )
         }
         (state, Event::Server(OutputChunk::StartReadingStdin)) => {
             // TODO: What is the consequence of sending stdin before this chunk? For now we ignore
             // it and send stdin chunks as they arrive.
             Box::new(future::result(Ok(state)))
         }
-        (_, Event::Server(OutputChunk::Exit(code))) => {
+        (ClientState(_, cli), Event::Server(OutputChunk::Exit(code))) => {
             debug!("Client got exit code: {}", code);
-            Box::new(future::result(Err(ClientError::Clean(ExitCode(code)))))
+            let code = ExitCode(code);
+            Box::new(
+                cli.send(ChildOutput::Exit(code))
+                    .map_err(|e| ClientError::Dirty(send_to_io(e)))
+                    .and_then(move |_| Err(ClientError::Clean(code))),
+            )
         }
-        (ClientState(server), Event::Cli(CliEvent::Stdin(bytes))) => Box::new(
+        (ClientState(server, cli), Event::Cli(ChildInput::Stdin(bytes))) => Box::new(
             server
                 .send(InputChunk::Stdin(bytes))
                 .map_err(ClientError::Dirty)
-                .map(ClientState),
+                .map(|server| ClientState(server, cli)),
         ),
-        (ClientState(server), Event::Cli(CliEvent::StdinEOF)) => Box::new(
+        (ClientState(server, cli), Event::Cli(ChildInput::StdinEOF)) => Box::new(
             server
                 .send(InputChunk::StdinEOF)
                 .map_err(ClientError::Dirty)
-                .map(ClientState),
+                .map(|server| ClientState(server, cli)),
         ),
     }
 }

@@ -44,7 +44,10 @@ pub fn child_channel<T>() -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
 }
 
 pub fn send_to_io<T: Debug>(e: mpsc::SendError<T>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, format!("Failed to send: {:?}", e))
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        format!("Failed to send: {:?}", e),
+    )
 }
 
 ///

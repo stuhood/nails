@@ -6,14 +6,15 @@ extern crate log;
 extern crate tokio_core;
 
 use std::env;
+use std::io::{self, Write};
 use std::net::SocketAddr;
 
-use futures::Future;
+use futures::{future, Future, Stream};
 use log::debug;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Core;
 
-use nails::execution::Command;
+use nails::execution::{child_channel, ChildInput, ChildOutput, Command};
 
 ///
 /// Split env::args into a nailgun server address, and the args to send to the server.
@@ -59,12 +60,30 @@ fn main() -> Result<(), String> {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
 
+    // A task to render stdout.
+    // TODO: This is blocking, and should probably use tokio's stdio facilities instead.
+    let (stdio_write, stdio_read) = child_channel::<ChildOutput>();
+    let stdio_printer = stdio_read
+        .map_err(|()| unreachable!())
+        .for_each(|output| match output {
+            ChildOutput::Stdout(bytes) => future::result(io::stdout().write_all(&bytes)),
+            ChildOutput::Stderr(bytes) => future::result(io::stderr().write_all(&bytes)),
+            ChildOutput::Exit(_) => {
+                // NB: We ignore exit here and allow the main thread to handle exiting.
+                future::ok::<_, io::Error>(())
+            }
+        })
+        .map_err(|e| format!("Error rendering stdio: {}", e));
+
+    // And the connection.
+    // TODO: Send stdin.
+    let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
+    let connection = TcpStream::connect(&addr, &handle)
+        .and_then(|stream| nails::client_handle_connection(stream, cmd, stdio_write, stdin_read))
+        .map_err(|e| format!("Error communicating with server: {}", e));
+
     debug!("Connecting to server at {}...", addr);
-    let exit_code = core.run(
-        TcpStream::connect(&addr, &handle)
-            .and_then(|stream| nails::client_handle_connection(stream, cmd))
-            .map_err(|e| format!("Error communicating with server: {}", e)),
-    )?;
+    let (exit_code, ()) = core.run(connection.join(stdio_printer))?;
     debug!("Exiting with {}", exit_code.0);
     std::process::exit(exit_code.0);
 }
