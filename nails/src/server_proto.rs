@@ -3,26 +3,26 @@ use std::fmt::Debug;
 use std::io;
 use std::path::PathBuf;
 
-use futures::{future, Future, Stream, Sink};
 use futures::sync::mpsc;
-use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_io::codec::Framed;
+use futures::{future, Future, Sink, Stream};
+use tokio_codec::Framed;
 use tokio_core::reactor::Handle;
+use tokio_io::{AsyncRead, AsyncWrite};
 
-use codec::{Codec, InputChunk, OutputChunk};
-use execution::{Args, ChildInput, ChildOutput, child_channel, send_to_io};
+use codec::{InputChunk, OutputChunk, ServerCodec};
+use execution::{child_channel, send_to_io, Args, ChildInput, ChildOutput, Command, Env, ExitCode};
 
 #[derive(Debug)]
 enum State<C: ClientSink> {
     // While we're gathering arguments and environment, but before the working directory has
     // arrived.
-    Initializing(C, mpsc::Sender<ChildOutput>, Args),
+    Initializing(C, mpsc::Sender<ChildOutput>, Args, Env),
     // After the working directory has arrived, but before the command arrives.
-    PreCommand(C, mpsc::Sender<ChildOutput>, Args, PathBuf),
+    PreCommand(C, mpsc::Sender<ChildOutput>, Args, Env, PathBuf),
     // Executing, and able to receive stdin.
     Executing(C, mpsc::Sender<ChildInput>),
     // Process has finished executing.
-    Exited(i32),
+    Exited(ExitCode),
 }
 
 #[derive(Debug)]
@@ -33,7 +33,7 @@ enum Event {
 
 pub fn execute<T, N>(
     handle: Handle,
-    transport: Framed<T, Codec>,
+    transport: Framed<T, ServerCodec>,
     config: super::Config<N>,
 ) -> IOFuture<()>
 where
@@ -56,7 +56,12 @@ where
     Box::new(
         events_read
             .fold(
-                State::Initializing(client_write, process_write, Default::default()),
+                State::Initializing(
+                    client_write,
+                    process_write,
+                    Default::default(),
+                    Default::default(),
+                ),
                 move |state, ev| step(&handle, &config, state, ev),
             )
             .then(|_| Ok(())),
@@ -70,49 +75,55 @@ fn step<C: ClientSink, N: super::Nail>(
     ev: Event,
 ) -> IOFuture<State<C>> {
     match (state, ev) {
-        (State::Initializing(c, p, mut args), Event::Client(InputChunk::Argument(arg))) => {
-            args.args.push(arg);
-            ok(State::Initializing(c, p, args))
+        (State::Initializing(c, p, mut args, env), Event::Client(InputChunk::Argument(arg))) => {
+            args.push(arg);
+            ok(State::Initializing(c, p, args, env))
         }
-        (State::Initializing(c, p, mut args),
-         Event::Client(InputChunk::Environment { key, val })) => {
-            args.env.push((key, val));
-            ok(State::Initializing(c, p, args))
+        (
+            State::Initializing(c, p, args, mut env),
+            Event::Client(InputChunk::Environment { key, val }),
+        ) => {
+            env.push((key, val));
+            ok(State::Initializing(c, p, args, env))
         }
-        (State::Initializing(c, p, args), Event::Client(InputChunk::WorkingDir(working_dir))) => {
-            ok(State::PreCommand(c, p, args, working_dir))
-        }
-        (State::PreCommand(client, output_sink, args, working_dir),
-         Event::Client(InputChunk::Command(cmd))) => {
-            let cmd_desc = cmd.clone();
-            let (stdin_tx, stdin_rx) = child_channel::<ChildInput>();
-            let spawn_res = config.nail.spawn(
-                cmd,
+        (
+            State::Initializing(c, p, args, env),
+            Event::Client(InputChunk::WorkingDir(working_dir)),
+        ) => ok(State::PreCommand(c, p, args, env, working_dir)),
+        (
+            State::PreCommand(client, output_sink, args, env, working_dir),
+            Event::Client(InputChunk::Command(command)),
+        ) => {
+            let cmd_desc = command.clone();
+            let cmd = Command {
+                command,
                 args,
+                env,
                 working_dir,
-                output_sink,
-                stdin_rx,
-                handle,
-            );
-            Box::new(future::result(spawn_res).then(move |res| match res {
-                Ok(()) => {
-                    Box::new(client.send(OutputChunk::StartReadingStdin).map(|client| {
-                        State::Executing(client, stdin_tx)
-                    })) as LoopFuture<_>
-                }
-                Err(e) => {
-                    Box::new(
+            };
+            let (stdin_tx, stdin_rx) = child_channel::<ChildInput>();
+            let spawn_res = config.nail.spawn(cmd, output_sink, stdin_rx, handle);
+            Box::new(future::result(spawn_res).then(move |res| {
+                match res {
+                    Ok(()) => Box::new(
                         client
-                            .send(OutputChunk::Stderr(
-                                format!("Failed to launch child `{}`: {:?}\n", cmd_desc, e)
-                                    .into(),
-                            ))
-                            .and_then(move |client| client.send(OutputChunk::Exit(1)))
-                            .map(|_| {
-                                // Drop the client and exit.
-                                State::Exited(1)
-                            }),
-                    ) as LoopFuture<_>
+                            .send(OutputChunk::StartReadingStdin)
+                            .map(|client| State::Executing(client, stdin_tx)),
+                    ) as LoopFuture<_>,
+                    Err(e) => {
+                        Box::new(
+                            client
+                                .send(OutputChunk::Stderr(
+                                    format!("Failed to launch child `{}`: {:?}\n", cmd_desc, e)
+                                        .into(),
+                                ))
+                                .and_then(move |client| client.send(OutputChunk::Exit(1)))
+                                .map(|_| {
+                                    // Drop the client and exit.
+                                    State::Exited(ExitCode(1))
+                                }),
+                        ) as LoopFuture<_>
+                    }
                 }
             }))
         }
@@ -133,11 +144,13 @@ fn step<C: ClientSink, N: super::Nail>(
                     }),
             ) as LoopFuture<_>
         }
-        (State::Executing(client, child), Event::Client(InputChunk::StdinEOF)) => {
-            Box::new(child.send(ChildInput::StdinEOF).map_err(send_to_io).map(
-                |child| State::Executing(client, child),
-            )) as LoopFuture<_>
-        }
+        (State::Executing(client, child), Event::Client(InputChunk::StdinEOF)) => Box::new(
+            child
+                .send(ChildInput::StdinEOF)
+                .map_err(send_to_io)
+                .map(|child| State::Executing(client, child)),
+        )
+            as LoopFuture<_>,
         (State::Executing(client, child), Event::Process(child_output)) => {
             let exit_code = match child_output {
                 ChildOutput::Exit(code) => Some(code),
@@ -155,11 +168,10 @@ fn step<C: ClientSink, N: super::Nail>(
             // Not documented in the spec, but presumably always valid and ignored?
             ok(s)
         }
-        (s, e) => {
-            Box::new(future::err(
-                err(&format!("Invalid event {:?} during phase {:?}", e, s)),
-            ))
-        }
+        (s, e) => Box::new(future::err(err(&format!(
+            "Invalid event {:?} during phase {:?}",
+            e, s
+        )))),
     }
 }
 
@@ -176,7 +188,7 @@ impl From<ChildOutput> for OutputChunk {
         match co {
             ChildOutput::Stdout(bytes) => OutputChunk::Stdout(bytes),
             ChildOutput::Stderr(bytes) => OutputChunk::Stderr(bytes),
-            ChildOutput::Exit(code) => OutputChunk::Exit(code),
+            ChildOutput::Exit(code) => OutputChunk::Exit(code.0),
         }
     }
 }
@@ -190,5 +202,5 @@ type IOFuture<T> = Box<Future<Item = T, Error = io::Error>>;
 ///
  #[cfg_attr(rustfmt, rustfmt_skip)]
 trait ClientSink: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static {}
- #[cfg_attr(rustfmt, rustfmt_skip)]
+#[cfg_attr(rustfmt, rustfmt_skip)]
 impl<T> ClientSink for T where T: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static {}

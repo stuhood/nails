@@ -21,7 +21,7 @@ fn main() {
     println!("Bound listener: {:?}", listener);
     let server = listener.incoming().for_each(|(socket, _)| {
         println!("Got connection: {:?}", socket);
-        nails::handle_connection(config.clone(), &handle, socket)
+        nails::server_handle_connection(config.clone(), &handle, socket)
     });
 
     core.run(server).unwrap();

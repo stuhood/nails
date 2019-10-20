@@ -2,16 +2,25 @@ extern crate futures;
 
 use std::fmt::Debug;
 use std::io;
+use std::path::PathBuf;
 
 use bytes::Bytes;
 use futures::sync::mpsc;
 
 const BUF_COUNT: usize = 128;
 
+pub type Args = Vec<String>;
+pub type Env = Vec<(String, String)>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExitCode(pub i32);
+
 #[derive(Debug, Default)]
-pub struct Args {
+pub struct Command {
+    pub command: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    pub working_dir: PathBuf,
 }
 
 #[derive(Debug)]
@@ -24,7 +33,7 @@ pub enum ChildInput {
 pub enum ChildOutput {
     Stdout(Bytes),
     Stderr(Bytes),
-    Exit(i32),
+    Exit(ExitCode),
 }
 
 ///

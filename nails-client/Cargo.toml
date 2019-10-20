@@ -1,12 +1,11 @@
 [package]
-name = "nails"
+name = "nails-client"
 version = "0.1.0"
 authors = ["Stu Hood <stuhood@gmail.com>"]
 
 [dependencies]
-bytes = "0.4"
+env_logger = "0.5.4"
 futures = "0.1"
 log = "0.4"
-tokio-codec = "0.1"
+nails = { path = "../nails" }
 tokio-core = "0.1"
-tokio-io = "0.1"

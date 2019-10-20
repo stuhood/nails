@@ -1,24 +1,24 @@
-extern crate nails;
 extern crate bytes;
 extern crate futures;
+extern crate nails;
+extern crate tokio_codec;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_process;
 
 use std::io;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use bytes::{Bytes, BytesMut};
-use futures::{Future, Stream, Sink};
 use futures::sync::mpsc;
+use futures::{Future, Sink, Stream};
 use tokio_core::reactor::Handle;
 use tokio_io::codec::{Decoder, Encoder};
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_process::CommandExt;
 
+use nails::execution::{self, send_to_io, unreachable_io, ChildInput, ChildOutput, ExitCode};
 use nails::Nail;
-use nails::execution::{Args, ChildInput, ChildOutput, send_to_io, unreachable_io};
 
 /// A Nail implementation that forks processes.
 #[derive(Clone)]
@@ -27,18 +27,16 @@ pub struct ForkNail;
 impl Nail for ForkNail {
     fn spawn(
         &self,
-        cmd: String,
-        args: Args,
-        working_dir: PathBuf,
+        cmd: execution::Command,
         output_sink: mpsc::Sender<ChildOutput>,
         input_stream: mpsc::Receiver<ChildInput>,
         handle: &Handle,
     ) -> Result<(), io::Error> {
-        let mut child = Command::new(cmd.clone())
-            .args(args.args)
+        let mut child = Command::new(cmd.command.clone())
+            .args(cmd.args)
             .env_clear()
-            .envs(args.env)
-            .current_dir(working_dir)
+            .envs(cmd.env)
+            .current_dir(cmd.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
@@ -63,15 +61,13 @@ impl Nail for ForkNail {
         );
 
         // Fully consume the stdout/stderr streams before waiting on the exit stream.
-        let stdout_stream = stream_for(child.stdout().take().unwrap()).map(|bytes| {
-            ChildOutput::Stdout(bytes.into())
-        });
-        let stderr_stream = stream_for(child.stderr().take().unwrap()).map(|bytes| {
-            ChildOutput::Stderr(bytes.into())
-        });
-        let exit_stream = child.into_stream().map(|exit_status| {
-            ChildOutput::Exit(exit_status.code().unwrap_or(-1))
-        });
+        let stdout_stream = stream_for(child.stdout().take().unwrap())
+            .map(|bytes| ChildOutput::Stdout(bytes.into()));
+        let stderr_stream = stream_for(child.stderr().take().unwrap())
+            .map(|bytes| ChildOutput::Stderr(bytes.into()));
+        let exit_stream = child
+            .into_stream()
+            .map(|exit_status| ChildOutput::Exit(ExitCode(exit_status.code().unwrap_or(-1))));
         let output_stream = stdout_stream.select(stderr_stream).chain(exit_stream);
 
         // Spawn a task to send all of stdout/sterr/exit to our output sink.
@@ -88,14 +84,14 @@ impl Nail for ForkNail {
 
 fn stream_for<R: AsyncRead + Send + Sized + 'static>(
     r: R,
-) -> tokio_io::codec::FramedRead<R, IdentityCodec> {
-    tokio_io::codec::FramedRead::new(r, IdentityCodec)
+) -> tokio_codec::FramedRead<R, IdentityCodec> {
+    tokio_codec::FramedRead::new(r, IdentityCodec)
 }
 
 fn sink_for<W: AsyncWrite + Send + Sized + 'static>(
     w: W,
-) -> tokio_io::codec::FramedWrite<W, IdentityCodec> {
-    tokio_io::codec::FramedWrite::new(w, IdentityCodec)
+) -> tokio_codec::FramedWrite<W, IdentityCodec> {
+    tokio_codec::FramedWrite::new(w, IdentityCodec)
 }
 
 // TODO: Should switch this to a Codec which emits for either lines or elapsed time.

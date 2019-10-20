@@ -7,6 +7,7 @@ authors = ["Stu Hood <stuhood@gmail.com>"]
 nails = { path = "../nails" }
 bytes = "0.4"
 futures = "0.1"
+tokio-codec = "0.1"
 tokio-core = "0.1"
 tokio-io = "0.1"
 tokio-process = "0.1"
