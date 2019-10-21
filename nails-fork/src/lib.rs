@@ -1,17 +1,10 @@
-extern crate bytes;
-extern crate futures;
-extern crate nails;
-extern crate tokio_codec;
-extern crate tokio_core;
-extern crate tokio_io;
-extern crate tokio_process;
-
 use std::io;
 use std::process::{Command, Stdio};
 
 use bytes::{Bytes, BytesMut};
 use futures::sync::mpsc;
 use futures::{Future, Sink, Stream};
+use tokio_codec;
 use tokio_core::reactor::Handle;
 use tokio_io::codec::{Decoder, Encoder};
 use tokio_io::{AsyncRead, AsyncWrite};

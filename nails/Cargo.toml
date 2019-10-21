@@ -11,6 +11,7 @@ description = """
 trait that consuming crates can implement to plug in the logic that they would like to keep warm in
 a nailgun server.
 """
+edition = "2018"
 
 [dependencies]
 bytes = "0.4"

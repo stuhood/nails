@@ -7,8 +7,8 @@ use log::debug;
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use codec::{ClientCodec, InputChunk, OutputChunk};
-use execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
+use crate::codec::{ClientCodec, InputChunk, OutputChunk};
+use crate::execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
 
 #[derive(Debug)]
 enum Event {
@@ -56,7 +56,7 @@ pub fn execute<T>(
     cmd: Command,
     output_sink: mpsc::Sender<ChildOutput>,
     input_stream: mpsc::Receiver<ChildInput>,
-) -> Box<Future<Item = ExitCode, Error = io::Error>>
+) -> Box<dyn Future<Item = ExitCode, Error = io::Error>>
 where
     T: AsyncRead + AsyncWrite + Debug + 'static,
 {
@@ -159,7 +159,7 @@ fn io_err(e: &str) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
 }
 
-type ClientFuture<C> = Box<Future<Item = ClientState<C>, Error = ClientError>>;
+type ClientFuture<C> = Box<dyn Future<Item = ClientState<C>, Error = ClientError>>;
 
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4

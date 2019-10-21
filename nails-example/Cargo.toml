@@ -9,6 +9,7 @@ homepage = "https://github.com/stuhood/nails"
 description = """
 An example Nailgun server binary that configures and launches a server using `nails-fork`.
 """
+edition = "2018"
 
 [dependencies]
 nails = { path = "../nails", version = "=0.2.0" }

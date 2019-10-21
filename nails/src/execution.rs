@@ -1,4 +1,4 @@
-extern crate futures;
+use futures;
 
 use std::fmt::Debug;
 use std::io;

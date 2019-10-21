@@ -1,10 +1,3 @@
-extern crate bytes;
-extern crate futures;
-extern crate log;
-extern crate tokio_codec;
-extern crate tokio_core;
-extern crate tokio_io;
-
 mod client_proto;
 mod codec;
 pub mod execution;
@@ -17,8 +10,8 @@ use tokio_codec::Decoder;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
 
-use codec::{ClientCodec, ServerCodec};
-use execution::{ChildInput, ChildOutput, Command, ExitCode};
+use crate::codec::{ClientCodec, ServerCodec};
+use crate::execution::{ChildInput, ChildOutput, Command, ExitCode};
 
 #[derive(Clone)]
 pub struct Config<N: Nail> {
@@ -95,7 +88,7 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
-    use execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
+    use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
     use futures::sync::mpsc;
     use futures::{Future, Sink, Stream};
     use tokio_core::net::{TcpListener, TcpStream};

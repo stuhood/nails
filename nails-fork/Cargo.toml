@@ -9,6 +9,7 @@ homepage = "https://github.com/stuhood/nails"
 description = """
 A `Nail` trait implementation that forks a process as the user running the server.
 """
+edition = "2018"
 
 [dependencies]
 nails = { path = "../nails", version = "=0.2.0" }

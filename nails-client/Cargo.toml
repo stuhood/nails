@@ -9,6 +9,7 @@ homepage = "https://github.com/stuhood/nails"
 description = """
 A Nailgun client binary, intended to be equivalent to the C and Python clients.
 """
+edition = "2018"
 
 [dependencies]
 env_logger = "0.5.4"

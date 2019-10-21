@@ -9,8 +9,10 @@ use tokio_codec::Framed;
 use tokio_core::reactor::Handle;
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use codec::{InputChunk, OutputChunk, ServerCodec};
-use execution::{child_channel, send_to_io, Args, ChildInput, ChildOutput, Command, Env, ExitCode};
+use crate::codec::{InputChunk, OutputChunk, ServerCodec};
+use crate::execution::{
+    child_channel, send_to_io, Args, ChildInput, ChildOutput, Command, Env, ExitCode,
+};
 
 #[derive(Debug)]
 enum State<C: ClientSink> {
@@ -195,7 +197,7 @@ impl From<ChildOutput> for OutputChunk {
 
 type LoopFuture<C> = IOFuture<State<C>>;
 
-type IOFuture<T> = Box<Future<Item = T, Error = io::Error>>;
+type IOFuture<T> = Box<dyn Future<Item = T, Error = io::Error>>;
 
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4

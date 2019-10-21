@@ -1,9 +1,6 @@
-extern crate nails;
+use nails;
 
-extern crate env_logger;
-extern crate futures;
-extern crate log;
-extern crate tokio_core;
+use env_logger;
 
 use std::env;
 use std::io::{self, Write};
