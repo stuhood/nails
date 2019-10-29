@@ -6,9 +6,8 @@ mod server_proto;
 use futures::sync::mpsc;
 use futures::{future, Future};
 use std::io;
+use tokio::net::TcpStream;
 use tokio_codec::Decoder;
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::Handle;
 
 use crate::codec::{ClientCodec, ServerCodec};
 use crate::execution::{ChildInput, ChildOutput, Command, ExitCode};
@@ -45,20 +44,16 @@ pub trait Nail: Clone + Send + Sync + 'static {
         cmd: Command,
         output_sink: mpsc::Sender<ChildOutput>,
         input_stream: mpsc::Receiver<ChildInput>,
-        handle: &Handle,
     ) -> Result<(), io::Error>;
 }
 
 pub fn server_handle_connection<N: Nail>(
     config: Config<N>,
-    handle: &Handle,
     socket: TcpStream,
 ) -> Result<(), io::Error> {
     socket.set_nodelay(true)?;
 
-    handle.spawn(
-        server_proto::execute(handle.clone(), ServerCodec.framed(socket), config).map_err(|_| ()),
-    );
+    tokio::spawn(server_proto::execute(ServerCodec.framed(socket), config).map_err(|_| ()));
 
     Ok(())
 }
@@ -68,7 +63,7 @@ pub fn client_handle_connection(
     cmd: Command,
     output_sink: mpsc::Sender<ChildOutput>,
     input_stream: mpsc::Receiver<ChildInput>,
-) -> Box<dyn Future<Item = ExitCode, Error = io::Error>> {
+) -> Box<dyn Future<Item = ExitCode, Error = io::Error> + Send> {
     if let Err(e) = socket.set_nodelay(true) {
         return Box::new(future::err(e));
     };
@@ -91,34 +86,32 @@ mod tests {
     use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
     use futures::sync::mpsc;
     use futures::{Future, Sink, Stream};
-    use tokio_core::net::{TcpListener, TcpStream};
-    use tokio_core::reactor::{Core, Handle};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::runtime::Runtime;
 
     #[test]
     fn roundtrip() {
         let expected_exit_code = ExitCode(67);
-        let mut core = Core::new().unwrap();
+        let mut runtime = Runtime::new().unwrap();
 
         // Launch a server that will accept one connection before exiting.
-        let handle = core.handle();
         let config = Config::new(ConstantNail(expected_exit_code));
-        let listener = TcpListener::bind(&"127.0.0.1:0".parse().unwrap(), &handle).unwrap();
+        let listener = TcpListener::bind(&"127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = listener.local_addr().unwrap();
 
-        core.handle().spawn(
+        runtime.spawn(
             listener
                 .incoming()
                 .take(1)
-                .for_each(move |(socket, _)| {
+                .for_each(move |socket| {
                     println!("Got connection: {:?}", socket);
-                    server_handle_connection(config.clone(), &handle, socket)
+                    server_handle_connection(config.clone(), socket)
                 })
                 .map_err(|e| panic!("Server exited early: {}", e)),
         );
 
         // And connect with a client. This Nail will ignore the content of the command, so we're
         // only validating the exit code.
-        let handle = core.handle();
         let cmd = Command {
             command: "nothing".to_owned(),
             args: vec![],
@@ -127,10 +120,10 @@ mod tests {
         };
         let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
         let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
-        let exit_code = core
-            .run(
-                TcpStream::connect(&addr, &handle)
-                    .and_then(|stream| {
+        let exit_code = runtime
+            .block_on(
+                TcpStream::connect(&addr)
+                    .and_then(move |stream| {
                         client_handle_connection(stream, cmd, stdio_write, stdin_read)
                     })
                     .map_err(|e| format!("Error communicating with server: {}", e)),
@@ -149,9 +142,8 @@ mod tests {
             _: Command,
             output_sink: mpsc::Sender<ChildOutput>,
             _: mpsc::Receiver<ChildInput>,
-            handle: &Handle,
         ) -> Result<(), io::Error> {
-            handle.spawn(
+            tokio::spawn(
                 output_sink
                     .send(ChildOutput::Exit(self.0.clone()))
                     .map(|_| ())

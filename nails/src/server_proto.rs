@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use futures::sync::mpsc;
 use futures::{future, Future, Sink, Stream};
 use tokio_codec::Framed;
-use tokio_core::reactor::Handle;
 use tokio_io::{AsyncRead, AsyncWrite};
 
 use crate::codec::{InputChunk, OutputChunk, ServerCodec};
@@ -33,13 +32,9 @@ enum Event {
     Process(ChildOutput),
 }
 
-pub fn execute<T, N>(
-    handle: Handle,
-    transport: Framed<T, ServerCodec>,
-    config: super::Config<N>,
-) -> IOFuture<()>
+pub fn execute<T, N>(transport: Framed<T, ServerCodec>, config: super::Config<N>) -> IOFuture<()>
 where
-    T: AsyncRead + AsyncWrite + Debug + 'static,
+    T: AsyncRead + AsyncWrite + Debug + Send + 'static,
     N: super::Nail,
 {
     // Create a channel to consume process output from a forked subprocess, and split the client
@@ -64,14 +59,13 @@ where
                     Default::default(),
                     Default::default(),
                 ),
-                move |state, ev| step(&handle, &config, state, ev),
+                move |state, ev| step(&config, state, ev),
             )
             .then(|_| Ok(())),
     )
 }
 
 fn step<C: ClientSink, N: super::Nail>(
-    handle: &Handle,
     config: &super::Config<N>,
     state: State<C>,
     ev: Event,
@@ -104,7 +98,7 @@ fn step<C: ClientSink, N: super::Nail>(
                 working_dir,
             };
             let (stdin_tx, stdin_rx) = child_channel::<ChildInput>();
-            let spawn_res = config.nail.spawn(cmd, output_sink, stdin_rx, handle);
+            let spawn_res = config.nail.spawn(cmd, output_sink, stdin_rx);
             Box::new(future::result(spawn_res).then(move |res| {
                 match res {
                     Ok(()) => Box::new(
@@ -177,7 +171,7 @@ fn step<C: ClientSink, N: super::Nail>(
     }
 }
 
-fn ok<T: 'static>(t: T) -> IOFuture<T> {
+fn ok<T: Send + 'static>(t: T) -> IOFuture<T> {
     Box::new(future::ok(t))
 }
 
@@ -197,12 +191,12 @@ impl From<ChildOutput> for OutputChunk {
 
 type LoopFuture<C> = IOFuture<State<C>>;
 
-type IOFuture<T> = Box<dyn Future<Item = T, Error = io::Error>>;
+type IOFuture<T> = Box<dyn Future<Item = T, Error = io::Error> + Send>;
 
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
 ///
  #[cfg_attr(rustfmt, rustfmt_skip)]
-trait ClientSink: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static {}
+trait ClientSink: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + Send + 'static {}
 #[cfg_attr(rustfmt, rustfmt_skip)]
-impl<T> ClientSink for T where T: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + 'static {}
+impl<T> ClientSink for T where T: Debug + Sink<SinkItem = OutputChunk, SinkError = io::Error> + Send + 'static {}

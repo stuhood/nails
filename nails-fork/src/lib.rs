@@ -5,7 +5,6 @@ use bytes::{Bytes, BytesMut};
 use futures::sync::mpsc;
 use futures::{Future, Sink, Stream};
 use tokio_codec;
-use tokio_core::reactor::Handle;
 use tokio_io::codec::{Decoder, Encoder};
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_process::CommandExt;
@@ -23,7 +22,6 @@ impl Nail for ForkNail {
         cmd: execution::Command,
         output_sink: mpsc::Sender<ChildOutput>,
         input_stream: mpsc::Receiver<ChildInput>,
-        handle: &Handle,
     ) -> Result<(), io::Error> {
         let mut child = Command::new(cmd.command.clone())
             .args(cmd.args)
@@ -33,10 +31,10 @@ impl Nail for ForkNail {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
-            .spawn_async(handle)?;
+            .spawn_async()?;
 
         // Copy inputs to the child.
-        handle.spawn(
+        tokio::spawn(
             sink_for(child.stdin().take().unwrap())
                 .send_all(
                     input_stream
@@ -64,7 +62,7 @@ impl Nail for ForkNail {
         let output_stream = stdout_stream.select(stderr_stream).chain(exit_stream);
 
         // Spawn a task to send all of stdout/sterr/exit to our output sink.
-        handle.spawn(
+        tokio::spawn(
             output_sink
                 .sink_map_err(send_to_io)
                 .send_all(output_stream)

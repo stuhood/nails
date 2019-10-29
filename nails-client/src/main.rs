@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 
 use futures::{future, Future, Stream};
 use log::debug;
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::Core;
+use tokio::net::TcpStream;
+use tokio::runtime::Runtime;
 
 use nails::execution::{child_channel, ChildInput, ChildOutput, Command};
 
@@ -54,8 +54,7 @@ fn main() -> Result<(), String> {
         working_dir,
     };
 
-    let mut core = Core::new().unwrap();
-    let handle = core.handle();
+    let mut runtime = Runtime::new().unwrap();
 
     // A task to render stdout.
     // TODO: This is blocking, and should probably use tokio's stdio facilities instead.
@@ -75,12 +74,12 @@ fn main() -> Result<(), String> {
     // And the connection.
     // TODO: Send stdin.
     let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
-    let connection = TcpStream::connect(&addr, &handle)
+    let connection = TcpStream::connect(&addr)
         .and_then(|stream| nails::client_handle_connection(stream, cmd, stdio_write, stdin_read))
         .map_err(|e| format!("Error communicating with server: {}", e));
 
     debug!("Connecting to server at {}...", addr);
-    let (exit_code, ()) = core.run(connection.join(stdio_printer))?;
+    let (exit_code, ()) = runtime.block_on(connection.join(stdio_printer))?;
     debug!("Exiting with {}", exit_code.0);
     std::process::exit(exit_code.0);
 }

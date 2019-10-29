@@ -56,9 +56,9 @@ pub fn execute<T>(
     cmd: Command,
     output_sink: mpsc::Sender<ChildOutput>,
     input_stream: mpsc::Receiver<ChildInput>,
-) -> Box<dyn Future<Item = ExitCode, Error = io::Error>>
+) -> Box<dyn Future<Item = ExitCode, Error = io::Error> + Send>
 where
-    T: AsyncRead + AsyncWrite + Debug + 'static,
+    T: AsyncRead + AsyncWrite + Debug + Send + 'static,
 {
     let (server_write, server_read) = transport.split();
 
@@ -159,12 +159,12 @@ fn io_err(e: &str) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
 }
 
-type ClientFuture<C> = Box<dyn Future<Item = ClientState<C>, Error = ClientError>>;
+type ClientFuture<C> = Box<dyn Future<Item = ClientState<C>, Error = ClientError> + Send>;
 
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
 ///
  #[cfg_attr(rustfmt, rustfmt_skip)]
-trait ServerSink: Debug + Sink<SinkItem = InputChunk, SinkError = io::Error> + 'static {}
+trait ServerSink: Debug + Sink<SinkItem = InputChunk, SinkError = io::Error> + Send + 'static {}
 #[cfg_attr(rustfmt, rustfmt_skip)]
-impl<T> ServerSink for T where T: Debug + Sink<SinkItem = InputChunk, SinkError = io::Error> + 'static {}
+impl<T> ServerSink for T where T: Debug + Sink<SinkItem = InputChunk, SinkError = io::Error> + Send + 'static {}
