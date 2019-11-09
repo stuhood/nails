@@ -1,15 +1,14 @@
 use std::io;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use bytes::{Bytes, BytesMut};
-use futures::sync::mpsc;
-use futures::{Future, Sink, Stream};
-use tokio_codec;
-use tokio_io::codec::{Decoder, Encoder};
-use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_process::CommandExt;
+use futures::channel::mpsc;
+use futures::{future, stream, FutureExt, SinkExt, StreamExt, TryStreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::process::Command;
+use tokio_util::codec::{self, Decoder, Encoder};
 
-use nails::execution::{self, send_to_io, unreachable_io, ChildInput, ChildOutput, ExitCode};
+use nails::execution::{self, send_to_io, ChildInput, ChildOutput, ExitCode};
 use nails::Nail;
 
 /// A Nail implementation that forks processes.
@@ -31,58 +30,56 @@ impl Nail for ForkNail {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
-            .spawn_async()?;
+            .spawn()?;
+
+        let mut bounded_input_stream = input_stream
+            .take_while(|child_input| match child_input {
+                &ChildInput::Stdin(_) => future::ready(true),
+                &ChildInput::StdinEOF => future::ready(false),
+            })
+            .map(|child_input| match child_input {
+                ChildInput::Stdin(bytes) => Ok(bytes),
+                ChildInput::StdinEOF => unreachable!(),
+            });
 
         // Copy inputs to the child.
-        tokio::spawn(
-            sink_for(child.stdin().take().unwrap())
-                .send_all(
-                    input_stream
-                        .take_while(|child_input| match child_input {
-                            &ChildInput::Stdin(_) => Ok(true),
-                            &ChildInput::StdinEOF => Ok(false),
-                        })
-                        .map(|child_input| match child_input {
-                            ChildInput::Stdin(bytes) => bytes,
-                            ChildInput::StdinEOF => unreachable!(),
-                        })
-                        .map_err(unreachable_io),
-                )
-                .then(|_| Ok(())),
-        );
+        let stdin = child.stdin().take().unwrap();
+        tokio::spawn(async move {
+            sink_for(stdin)
+                .send_all(&mut bounded_input_stream)
+                .map(|_| ())
+                .await;
+        });
 
         // Fully consume the stdout/stderr streams before waiting on the exit stream.
         let stdout_stream = stream_for(child.stdout().take().unwrap())
-            .map(|bytes| ChildOutput::Stdout(bytes.into()));
+            .map_ok(|bytes| ChildOutput::Stdout(bytes.into()));
         let stderr_stream = stream_for(child.stderr().take().unwrap())
-            .map(|bytes| ChildOutput::Stderr(bytes.into()));
+            .map_ok(|bytes| ChildOutput::Stderr(bytes.into()));
         let exit_stream = child
             .into_stream()
-            .map(|exit_status| ChildOutput::Exit(ExitCode(exit_status.code().unwrap_or(-1))));
-        let output_stream = stdout_stream.select(stderr_stream).chain(exit_stream);
+            .map_ok(|exit_status| ChildOutput::Exit(ExitCode(exit_status.code().unwrap_or(-1))));
+        let mut output_stream = stream::select(stdout_stream, stderr_stream).chain(exit_stream);
 
         // Spawn a task to send all of stdout/sterr/exit to our output sink.
-        tokio::spawn(
+        tokio::spawn(async move {
             output_sink
                 .sink_map_err(send_to_io)
-                .send_all(output_stream)
-                .then(|_| Ok(())),
-        );
+                .send_all(&mut output_stream)
+                .map(|_| ())
+                .await;
+        });
 
         Ok(())
     }
 }
 
-fn stream_for<R: AsyncRead + Send + Sized + 'static>(
-    r: R,
-) -> tokio_codec::FramedRead<R, IdentityCodec> {
-    tokio_codec::FramedRead::new(r, IdentityCodec)
+fn stream_for<R: AsyncRead + Send + Sized>(r: R) -> codec::FramedRead<R, IdentityCodec> {
+    codec::FramedRead::new(r, IdentityCodec)
 }
 
-fn sink_for<W: AsyncWrite + Send + Sized + 'static>(
-    w: W,
-) -> tokio_codec::FramedWrite<W, IdentityCodec> {
-    tokio_codec::FramedWrite::new(w, IdentityCodec)
+fn sink_for<W: AsyncWrite + Send + Sized>(w: W) -> codec::FramedWrite<W, IdentityCodec> {
+    codec::FramedWrite::new(w, IdentityCodec)
 }
 
 // TODO: Should switch this to a Codec which emits for either lines or elapsed time.

@@ -6,7 +6,7 @@ use std::env;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 
-use futures::{future, Future, Stream};
+use futures::{future, Stream, StreamExt, TryFutureExt};
 use log::debug;
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
@@ -40,6 +40,22 @@ fn parse_args(
     }
 }
 
+async fn print_stdio(
+    mut stdio_read: impl Stream<Item = ChildOutput> + Unpin,
+) -> Result<(), io::Error> {
+    while let Some(output) = stdio_read.next().await {
+        match output {
+            ChildOutput::Stdout(bytes) => io::stdout().write_all(&bytes)?,
+            ChildOutput::Stderr(bytes) => io::stderr().write_all(&bytes)?,
+            ChildOutput::Exit(_) => {
+                // NB: We ignore exit here and allow the main thread to handle exiting.
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     env_logger::init();
     let (addr, command, args) = parse_args(env::args())?;
@@ -59,17 +75,7 @@ fn main() -> Result<(), String> {
     // A task to render stdout.
     // TODO: This is blocking, and should probably use tokio's stdio facilities instead.
     let (stdio_write, stdio_read) = child_channel::<ChildOutput>();
-    let stdio_printer = stdio_read
-        .map_err(|()| unreachable!())
-        .for_each(|output| match output {
-            ChildOutput::Stdout(bytes) => future::result(io::stdout().write_all(&bytes)),
-            ChildOutput::Stderr(bytes) => future::result(io::stderr().write_all(&bytes)),
-            ChildOutput::Exit(_) => {
-                // NB: We ignore exit here and allow the main thread to handle exiting.
-                future::ok::<_, io::Error>(())
-            }
-        })
-        .map_err(|e| format!("Error rendering stdio: {}", e));
+    let stdio_printer = print_stdio(stdio_read);
 
     // And the connection.
     // TODO: Send stdin.
@@ -79,7 +85,9 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("Error communicating with server: {}", e));
 
     debug!("Connecting to server at {}...", addr);
-    let (exit_code, ()) = runtime.block_on(connection.join(stdio_printer))?;
+    let exit_code = runtime
+        .block_on(future::join(connection, stdio_printer))
+        .0?;
     debug!("Exiting with {}", exit_code.0);
     std::process::exit(exit_code.0);
 }

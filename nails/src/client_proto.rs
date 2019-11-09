@@ -1,11 +1,11 @@
 use std::fmt::Debug;
 use std::io;
 
-use futures::sync::mpsc;
-use futures::{future, Future, Sink, Stream};
+use futures::channel::mpsc;
+use futures::{stream, Sink, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
 use log::debug;
-use tokio_codec::Framed;
-use tokio_io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
 use crate::execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
@@ -51,120 +51,110 @@ fn command_as_chunks(cmd: Command) -> Vec<InputChunk> {
     chunks
 }
 
-pub fn execute<T>(
-    transport: Framed<T, ClientCodec>,
+pub async fn execute<R, W>(
+    read: R,
+    write: W,
     cmd: Command,
     output_sink: mpsc::Sender<ChildOutput>,
     input_stream: mpsc::Receiver<ChildInput>,
-) -> Box<dyn Future<Item = ExitCode, Error = io::Error> + Send>
+) -> Result<ExitCode, io::Error>
 where
-    T: AsyncRead + AsyncWrite + Debug + Send + 'static,
+    R: AsyncRead + Debug + Unpin + Send,
+    W: AsyncWrite + Debug + Unpin + Send,
 {
-    let (server_write, server_read) = transport.split();
+    let server_read = FramedRead::new(read, ClientCodec);
+    let mut server_write = FramedWrite::new(write, ClientCodec);
 
     // Send all the init chunks:
-    let init_chunks = futures::stream::iter_ok::<_, io::Error>(command_as_chunks(cmd))
+    let mut init_chunks = futures::stream::iter(command_as_chunks(cmd).into_iter().map(Ok))
         .inspect(|i| debug!("Client sending initialization chunk {:?}", i));
 
     // Select on the two input sources to create a merged Stream of events.
-    let events_read = input_stream
-        .then(|res| match res {
-            Ok(v) => Ok(Event::Cli(v)),
-            Err(e) => Err(err(&format!("Failed to emit child output: {:?}", e))),
-        })
-        .select(
-            server_read
-                .map(|e| Event::Server(e))
-                .map_err(ClientError::Dirty),
-        );
+    let mut events_read = stream::select(
+        input_stream.map(|v| Ok(Event::Cli(v))),
+        server_read.map_ok(|e| Event::Server(e)),
+    );
 
-    Box::new(
-        server_write
-            .send_all(init_chunks)
-            .map_err(|e| {
-                io_err(&format!(
-                    "Could not send initial chunks to the server. Got: {}",
-                    e
-                ))
-            })
-            .and_then(|sink_and_stream| {
-                let (server_write, _) = sink_and_stream;
-                events_read
-                    .fold(ClientState(server_write, output_sink), move |state, ev| {
-                        step(state, ev)
-                    })
-                    .then(|res| match res {
-                        Err(ClientError::Clean(code)) => Ok(code),
-                        Ok(_) => Err(io_err(
-                            "Client exited before the server's result could be returned.",
-                        )),
-                        Err(ClientError::Dirty(e)) => Err(e),
-                    })
-            }),
-    )
+    server_write
+        .send_all(&mut init_chunks)
+        .map_err(|e| {
+            io_err(&format!(
+                "Could not send initial chunks to the server. Got: {}",
+                e
+            ))
+        })
+        .await?;
+
+    let mut state = ClientState(server_write, output_sink);
+    while let Some(event) = events_read.next().await {
+        state = match step(state, event?).await {
+            Ok(s) => s,
+            Err(ClientError::Clean(code)) => return Ok(code),
+            Err(ClientError::Dirty(e)) => return Err(e),
+        };
+    }
+    Err(io_err(
+        "Client exited before the server's result could be returned.",
+    ))
 }
 
-fn step<C: ServerSink>(state: ClientState<C>, ev: Event) -> ClientFuture<C> {
+async fn step<C: ServerSink>(
+    state: ClientState<C>,
+    ev: Event,
+) -> Result<ClientState<C>, ClientError> {
     match (state, ev) {
-        (ClientState(server, cli), Event::Server(OutputChunk::Stderr(bytes))) => {
+        (ClientState(server, mut cli), Event::Server(OutputChunk::Stderr(bytes))) => {
             debug!("Client got {} bytes of stderr.", bytes.len());
-            Box::new(
-                cli.send(ChildOutput::Stderr(bytes))
-                    .map_err(|e| ClientError::Dirty(send_to_io(e)))
-                    .map(|cli| ClientState(server, cli)),
-            )
+            cli.send(ChildOutput::Stderr(bytes))
+                .map_err(|e| ClientError::Dirty(send_to_io(e)))
+                .await?;
+            Ok(ClientState(server, cli))
         }
-        (ClientState(server, cli), Event::Server(OutputChunk::Stdout(bytes))) => {
+        (ClientState(server, mut cli), Event::Server(OutputChunk::Stdout(bytes))) => {
             debug!("Client got {} bytes of stdout.", bytes.len());
-            Box::new(
-                cli.send(ChildOutput::Stdout(bytes))
-                    .map_err(|e| ClientError::Dirty(send_to_io(e)))
-                    .map(|cli| ClientState(server, cli)),
-            )
+            cli.send(ChildOutput::Stdout(bytes))
+                .map_err(|e| ClientError::Dirty(send_to_io(e)))
+                .await?;
+            Ok(ClientState(server, cli))
         }
         (state, Event::Server(OutputChunk::StartReadingStdin)) => {
             // TODO: What is the consequence of sending stdin before this chunk? For now we ignore
             // it and send stdin chunks as they arrive.
-            Box::new(future::result(Ok(state)))
+            Ok(state)
         }
-        (ClientState(_, cli), Event::Server(OutputChunk::Exit(code))) => {
+        (ClientState(_, mut cli), Event::Server(OutputChunk::Exit(code))) => {
             debug!("Client got exit code: {}", code);
             let code = ExitCode(code);
-            Box::new(
-                cli.send(ChildOutput::Exit(code))
-                    .map_err(|e| ClientError::Dirty(send_to_io(e)))
-                    .and_then(move |_| Err(ClientError::Clean(code))),
-            )
+            cli.send(ChildOutput::Exit(code))
+                .map_err(|e| ClientError::Dirty(send_to_io(e)))
+                .await?;
+            Err(ClientError::Clean(code))
         }
-        (ClientState(server, cli), Event::Cli(ChildInput::Stdin(bytes))) => Box::new(
+        (ClientState(mut server, cli), Event::Cli(ChildInput::Stdin(bytes))) => {
             server
                 .send(InputChunk::Stdin(bytes))
                 .map_err(ClientError::Dirty)
-                .map(|server| ClientState(server, cli)),
-        ),
-        (ClientState(server, cli), Event::Cli(ChildInput::StdinEOF)) => Box::new(
+                .await?;
+            Ok(ClientState(server, cli))
+        }
+        (ClientState(mut server, cli), Event::Cli(ChildInput::StdinEOF)) => {
             server
                 .send(InputChunk::StdinEOF)
                 .map_err(ClientError::Dirty)
-                .map(|server| ClientState(server, cli)),
-        ),
+                .await?;
+            Ok(ClientState(server, cli))
+        }
     }
-}
-
-fn err(e: &str) -> ClientError {
-    ClientError::Dirty(io_err(e))
 }
 
 fn io_err(e: &str) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
 }
 
-type ClientFuture<C> = Box<dyn Future<Item = ClientState<C>, Error = ClientError> + Send>;
-
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
 ///
  #[cfg_attr(rustfmt, rustfmt_skip)]
-trait ServerSink: Debug + Sink<SinkItem = InputChunk, SinkError = io::Error> + Send + 'static {}
+trait ServerSink: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send {}
 #[cfg_attr(rustfmt, rustfmt_skip)]
-impl<T> ServerSink for T where T: Debug + Sink<SinkItem = InputChunk, SinkError = io::Error> + Send + 'static {}
+impl<T> ServerSink for T where T: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send {}

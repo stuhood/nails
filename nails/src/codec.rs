@@ -5,7 +5,7 @@ use std::str;
 use std::os::unix::ffi::OsStrExt;
 
 use bytes::{BigEndian, ByteOrder, Bytes, BytesMut};
-use tokio_io::codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder, Encoder};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Chunk {

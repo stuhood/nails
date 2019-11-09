@@ -3,13 +3,10 @@ mod codec;
 pub mod execution;
 mod server_proto;
 
-use futures::sync::mpsc;
-use futures::{future, Future};
+use futures::channel::mpsc;
 use std::io;
 use tokio::net::TcpStream;
-use tokio_codec::Decoder;
 
-use crate::codec::{ClientCodec, ServerCodec};
 use crate::execution::{ChildInput, ChildOutput, Command, ExitCode};
 
 #[derive(Clone)]
@@ -47,33 +44,27 @@ pub trait Nail: Clone + Send + Sync + 'static {
     ) -> Result<(), io::Error>;
 }
 
-pub fn server_handle_connection<N: Nail>(
+pub async fn server_handle_connection<N: Nail>(
     config: Config<N>,
-    socket: TcpStream,
+    mut socket: TcpStream,
 ) -> Result<(), io::Error> {
     socket.set_nodelay(true)?;
 
-    tokio::spawn(server_proto::execute(ServerCodec.framed(socket), config).map_err(|_| ()));
+    let (read, write) = socket.split();
+    server_proto::execute(read, write, config).await?;
 
     Ok(())
 }
 
-pub fn client_handle_connection(
-    socket: TcpStream,
+pub async fn client_handle_connection(
+    mut socket: TcpStream,
     cmd: Command,
     output_sink: mpsc::Sender<ChildOutput>,
     input_stream: mpsc::Receiver<ChildInput>,
-) -> Box<dyn Future<Item = ExitCode, Error = io::Error> + Send> {
-    if let Err(e) = socket.set_nodelay(true) {
-        return Box::new(future::err(e));
-    };
-
-    Box::new(client_proto::execute(
-        ClientCodec.framed(socket),
-        cmd,
-        output_sink,
-        input_stream,
-    ))
+) -> Result<ExitCode, io::Error> {
+    socket.set_nodelay(true)?;
+    let (read, write) = socket.split();
+    client_proto::execute(read, write, cmd, output_sink, input_stream).await
 }
 
 #[cfg(test)]
@@ -84,8 +75,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
-    use futures::sync::mpsc;
-    use futures::{Future, Sink, Stream};
+    use futures::channel::mpsc;
+    use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::runtime::Runtime;
 
@@ -96,18 +87,18 @@ mod tests {
 
         // Launch a server that will accept one connection before exiting.
         let config = Config::new(ConstantNail(expected_exit_code));
-        let listener = TcpListener::bind(&"127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = runtime.block_on(TcpListener::bind(&"127.0.0.1:0")).unwrap();
         let addr = listener.local_addr().unwrap();
 
         runtime.spawn(
             listener
                 .incoming()
                 .take(1)
-                .for_each(move |socket| {
+                .try_for_each(move |socket| {
                     println!("Got connection: {:?}", socket);
                     server_handle_connection(config.clone(), socket)
                 })
-                .map_err(|e| panic!("Server exited early: {}", e)),
+                .map(|_| ()),
         );
 
         // And connect with a client. This Nail will ignore the content of the command, so we're
@@ -140,15 +131,13 @@ mod tests {
         fn spawn(
             &self,
             _: Command,
-            output_sink: mpsc::Sender<ChildOutput>,
+            mut output_sink: mpsc::Sender<ChildOutput>,
             _: mpsc::Receiver<ChildInput>,
         ) -> Result<(), io::Error> {
-            tokio::spawn(
-                output_sink
-                    .send(ChildOutput::Exit(self.0.clone()))
-                    .map(|_| ())
-                    .map_err(|e| panic!("Server could not send an exit code: {}", e)),
-            );
+            let code = self.0.clone();
+            tokio::spawn(async move {
+                output_sink.send(ChildOutput::Exit(code)).map(|_| ()).await;
+            });
             Ok(())
         }
     }

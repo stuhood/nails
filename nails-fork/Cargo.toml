@@ -14,8 +14,6 @@ edition = "2018"
 [dependencies]
 nails = { path = "../nails", version = "=0.3.0" }
 bytes = "0.4"
-futures = "0.1"
-tokio = "0.1"
-tokio-codec = "0.1"
-tokio-io = "0.1"
-tokio-process = "0.2"
+futures = "0.3"
+tokio = { git = "https://github.com/tokio-rs/tokio", rev = "7e35922a1d282b1e3dadf037cd237be336b331fb" }
+tokio-util = { git = "https://github.com/tokio-rs/tokio", rev = "7e35922a1d282b1e3dadf037cd237be336b331fb" }
