@@ -4,7 +4,8 @@ use std::str;
 
 use std::os::unix::ffi::OsStrExt;
 
-use bytes::{BigEndian, ByteOrder, Bytes, BytesMut};
+use byteorder::{BigEndian, ByteOrder};
+use bytes::{Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -225,7 +226,7 @@ mod tests {
             for chunk in chunks.clone() {
                 encode(chunk, &mut buf).unwrap();
             }
-            buf.take()
+            buf.split()
         };
 
         let mut decoded_chunks = Vec::new();

@@ -43,7 +43,7 @@ impl Nail for ForkNail {
             });
 
         // Copy inputs to the child.
-        let stdin = child.stdin().take().unwrap();
+        let stdin = child.stdin.take().unwrap();
         tokio::spawn(async move {
             sink_for(stdin)
                 .send_all(&mut bounded_input_stream)
@@ -52,9 +52,9 @@ impl Nail for ForkNail {
         });
 
         // Fully consume the stdout/stderr streams before waiting on the exit stream.
-        let stdout_stream = stream_for(child.stdout().take().unwrap())
+        let stdout_stream = stream_for(child.stdout.take().unwrap())
             .map_ok(|bytes| ChildOutput::Stdout(bytes.into()));
-        let stderr_stream = stream_for(child.stderr().take().unwrap())
+        let stderr_stream = stream_for(child.stderr.take().unwrap())
             .map_ok(|bytes| ChildOutput::Stderr(bytes.into()));
         let exit_stream = child
             .into_stream()
@@ -93,7 +93,7 @@ impl Decoder for IdentityCodec {
         if buf.len() == 0 {
             Ok(None)
         } else {
-            Ok(Some(buf.take().freeze()))
+            Ok(Some(buf.split().freeze()))
         }
     }
 }

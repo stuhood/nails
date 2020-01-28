@@ -76,30 +76,23 @@ mod tests {
 
     use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
     use futures::channel::mpsc;
-    use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
+    use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::runtime::Runtime;
 
-    #[test]
-    fn roundtrip() {
+    #[tokio::test]
+    async fn roundtrip() {
         let expected_exit_code = ExitCode(67);
-        let mut runtime = Runtime::new().unwrap();
 
         // Launch a server that will accept one connection before exiting.
         let config = Config::new(ConstantNail(expected_exit_code));
-        let listener = runtime.block_on(TcpListener::bind(&"127.0.0.1:0")).unwrap();
+        let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        runtime.spawn(
-            listener
-                .incoming()
-                .take(1)
-                .try_for_each(move |socket| {
-                    println!("Got connection: {:?}", socket);
-                    server_handle_connection(config.clone(), socket)
-                })
-                .map(|_| ()),
-        );
+        tokio::spawn(async move {
+            let socket = listener.incoming().next().await.unwrap().unwrap();
+            println!("Got connection: {:?}", socket);
+            tokio::spawn(server_handle_connection(config.clone(), socket))
+        });
 
         // And connect with a client. This Nail will ignore the content of the command, so we're
         // only validating the exit code.
@@ -111,14 +104,10 @@ mod tests {
         };
         let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
         let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
-        let exit_code = runtime
-            .block_on(
-                TcpStream::connect(&addr)
-                    .and_then(move |stream| {
-                        client_handle_connection(stream, cmd, stdio_write, stdin_read)
-                    })
-                    .map_err(|e| format!("Error communicating with server: {}", e)),
-            )
+        let exit_code = TcpStream::connect(&addr)
+            .and_then(move |stream| client_handle_connection(stream, cmd, stdio_write, stdin_read))
+            .map_err(|e| format!("Error communicating with server: {}", e))
+            .await
             .unwrap();
 
         assert_eq!(expected_exit_code, exit_code);

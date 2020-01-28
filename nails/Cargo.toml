@@ -14,8 +14,12 @@ a nailgun server.
 edition = "2018"
 
 [dependencies]
-bytes = "0.4"
+bytes = "0.5"
+byteorder = "1"
 futures = "0.3"
 log = "0.4"
-tokio = { git = "https://github.com/tokio-rs/tokio", rev = "7e35922a1d282b1e3dadf037cd237be336b331fb" }
-tokio-util = { git = "https://github.com/tokio-rs/tokio", rev = "7e35922a1d282b1e3dadf037cd237be336b331fb" }
+tokio = { version = "0.2", features = ["dns", "rt-core", "tcp"] }
+tokio-util = { version = "0.2", features = ["codec"] }
+
+[dev-dependencies]
+tokio = { version = "0.2", features = ["macros", "stream"] }
