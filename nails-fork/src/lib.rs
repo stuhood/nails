@@ -1,14 +1,11 @@
 use std::io;
 use std::process::Stdio;
 
-use bytes::{Bytes, BytesMut};
 use futures::channel::mpsc;
 use futures::{future, stream, FutureExt, SinkExt, StreamExt, TryStreamExt};
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Command;
-use tokio_util::codec::{self, Decoder, Encoder};
 
-use nails::execution::{self, send_to_io, ChildInput, ChildOutput, ExitCode};
+use nails::execution::{self, send_to_io, sink_for, stream_for, ChildInput, ChildOutput, ExitCode};
 use nails::Nail;
 
 /// A Nail implementation that forks processes.
@@ -70,42 +67,6 @@ impl Nail for ForkNail {
                 .await;
         });
 
-        Ok(())
-    }
-}
-
-fn stream_for<R: AsyncRead + Send + Sized>(r: R) -> codec::FramedRead<R, IdentityCodec> {
-    codec::FramedRead::new(r, IdentityCodec)
-}
-
-fn sink_for<W: AsyncWrite + Send + Sized>(w: W) -> codec::FramedWrite<W, IdentityCodec> {
-    codec::FramedWrite::new(w, IdentityCodec)
-}
-
-// TODO: Should switch this to a Codec which emits for either lines or elapsed time.
-struct IdentityCodec;
-
-impl Decoder for IdentityCodec {
-    type Item = Bytes;
-    type Error = io::Error;
-
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if buf.len() == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(buf.split().freeze()))
-        }
-    }
-}
-
-impl Encoder for IdentityCodec {
-    type Item = Bytes;
-    type Error = io::Error;
-
-    fn encode(&mut self, item: Bytes, buf: &mut BytesMut) -> Result<(), io::Error> {
-        if item.len() > 0 {
-            buf.extend(item);
-        }
         Ok(())
     }
 }
