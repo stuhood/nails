@@ -36,23 +36,25 @@ where
 }
 
 pub trait Nail: Clone + Send + Sync + 'static {
+    ///
+    /// Spawns an instance of the nail, and returns true if the instance would like to receive
+    /// stdin. If stdin should not be accepted, the input_stream will close immediately.
+    ///
     fn spawn(
         &self,
         cmd: Command,
         output_sink: mpsc::Sender<ChildOutput>,
         input_stream: mpsc::Receiver<ChildInput>,
-    ) -> Result<(), io::Error>;
+    ) -> Result<bool, io::Error>;
 }
 
 pub async fn server_handle_connection<N: Nail>(
     config: Config<N>,
-    mut socket: TcpStream,
+    socket: TcpStream,
 ) -> Result<(), io::Error> {
     socket.set_nodelay(true)?;
-
-    let (read, write) = socket.split();
+    let (read, write) = socket.into_split();
     server_proto::execute(read, write, config).await?;
-
     Ok(())
 }
 
@@ -122,12 +124,12 @@ mod tests {
             _: Command,
             mut output_sink: mpsc::Sender<ChildOutput>,
             _: mpsc::Receiver<ChildInput>,
-        ) -> Result<(), io::Error> {
+        ) -> Result<bool, io::Error> {
             let code = self.0.clone();
             tokio::spawn(async move {
                 output_sink.send(ChildOutput::Exit(code)).map(|_| ()).await;
             });
-            Ok(())
+            Ok(true)
         }
     }
 }

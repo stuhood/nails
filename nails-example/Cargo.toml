@@ -15,4 +15,4 @@ edition = "2018"
 nails = { path = "../nails", version = "=0.4.1" }
 nails-fork = { path = "../nails-fork", version = "=0.4.1" }
 futures = "0.3"
-tokio = { version = "0.2", features = ["macros", "rt-core", "stream", "tcp"] }
+tokio = { version = "0.2", features = ["dns", "macros", "rt-threaded", "stream", "tcp"] }

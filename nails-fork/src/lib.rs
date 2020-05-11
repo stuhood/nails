@@ -18,7 +18,7 @@ impl Nail for ForkNail {
         cmd: execution::Command,
         output_sink: mpsc::Sender<ChildOutput>,
         input_stream: mpsc::Receiver<ChildInput>,
-    ) -> Result<(), io::Error> {
+    ) -> Result<bool, io::Error> {
         let mut child = Command::new(cmd.command.clone())
             .args(cmd.args)
             .env_clear()
@@ -67,6 +67,6 @@ impl Nail for ForkNail {
                 .await;
         });
 
-        Ok(())
+        Ok(true)
     }
 }

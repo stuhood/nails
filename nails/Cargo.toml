@@ -18,8 +18,8 @@ bytes = "0.5"
 byteorder = "1"
 futures = "0.3"
 log = "0.4"
-tokio = { version = "0.2", features = ["dns", "rt-core", "tcp"] }
+tokio = { version = "0.2", features = ["sync", "tcp"] }
 tokio-util = { version = "0.2", features = ["codec"] }
 
 [dev-dependencies]
-tokio = { version = "0.2", features = ["macros", "stream"] }
+tokio = { version = "0.2", features = ["dns", "macros", "rt-core", "stream"] }
