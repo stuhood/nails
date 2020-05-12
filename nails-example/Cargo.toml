@@ -1,6 +1,6 @@
 [package]
 name = "nails-example"
-version = "0.4.1"
+version = "0.5.0"
 authors = ["Stu Hood <stuhood@gmail.com>"]
 license = "Apache-2.0"
 readme = "../README.md"
@@ -12,7 +12,7 @@ An example Nailgun server binary that configures and launches a server using `na
 edition = "2018"
 
 [dependencies]
-nails = { path = "../nails", version = "=0.4.1" }
-nails-fork = { path = "../nails-fork", version = "=0.4.1" }
+nails = { path = "../nails", version = "=0.5.0" }
+nails-fork = { path = "../nails-fork", version = "=0.5.0" }
 futures = "0.3"
 tokio = { version = "0.2", features = ["dns", "macros", "rt-threaded", "stream", "tcp"] }
