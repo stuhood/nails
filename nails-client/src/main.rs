@@ -3,15 +3,16 @@ use nails;
 use env_logger;
 
 use std::env;
-use std::io::{self, Write};
+use std::io;
 use std::net::SocketAddr;
 
-use futures::{future, Stream, StreamExt, TryFutureExt};
+use futures::channel::mpsc;
+use futures::{SinkExt, Stream, StreamExt, TryFutureExt};
 use log::debug;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::runtime::Runtime;
 
-use nails::execution::{child_channel, ChildInput, ChildOutput, Command};
+use nails::execution::{child_channel, send_to_io, stream_for, ChildInput, ChildOutput, Command};
 
 ///
 /// Split env::args into a nailgun server address, and the args to send to the server.
@@ -40,13 +41,15 @@ fn parse_args(
     }
 }
 
-async fn print_stdio(
+async fn handle_stdio(
     mut stdio_read: impl Stream<Item = ChildOutput> + Unpin,
 ) -> Result<(), io::Error> {
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
     while let Some(output) = stdio_read.next().await {
         match output {
-            ChildOutput::Stdout(bytes) => io::stdout().write_all(&bytes)?,
-            ChildOutput::Stderr(bytes) => io::stderr().write_all(&bytes)?,
+            ChildOutput::Stdout(bytes) => stdout.write_all(&bytes).await?,
+            ChildOutput::Stderr(bytes) => stderr.write_all(&bytes).await?,
             ChildOutput::Exit(_) => {
                 // NB: We ignore exit here and allow the main thread to handle exiting.
                 break;
@@ -56,7 +59,23 @@ async fn print_stdio(
     Ok(())
 }
 
-fn main() -> Result<(), String> {
+async fn handle_stdin(mut stdin_write: mpsc::Sender<ChildInput>) -> Result<(), io::Error> {
+    let mut stdin = stream_for(tokio::io::stdin());
+    while let Some(input_bytes) = stdin.next().await {
+        stdin_write
+            .send(ChildInput::Stdin(input_bytes?))
+            .await
+            .map_err(send_to_io)?;
+    }
+    stdin_write
+        .send(ChildInput::StdinEOF)
+        .await
+        .map_err(send_to_io)?;
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), String> {
     env_logger::init();
     let (addr, command, args) = parse_args(env::args())?;
 
@@ -70,24 +89,24 @@ fn main() -> Result<(), String> {
         working_dir,
     };
 
-    let mut runtime = Runtime::new().unwrap();
-
-    // A task to render stdout.
-    // TODO: This is blocking, and should probably use tokio's stdio facilities instead.
+    // Spawn tasks to read stdout/stderr and write stdin.
     let (stdio_write, stdio_read) = child_channel::<ChildOutput>();
-    let stdio_printer = print_stdio(stdio_read);
+    let (stdin_write, stdin_read) = child_channel::<ChildInput>();
+    let stdio_printer = tokio::spawn(handle_stdio(stdio_read));
+    let _join = tokio::spawn(handle_stdin(stdin_write));
 
-    // And the connection.
-    // TODO: Send stdin.
-    let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
-    let connection = TcpStream::connect(&addr)
-        .and_then(|stream| nails::client_handle_connection(stream, cmd, stdio_write, stdin_read))
-        .map_err(|e| format!("Error communicating with server: {}", e));
-
+    // And handle the connection in the foreground.
     debug!("Connecting to server at {}...", addr);
-    let exit_code = runtime
-        .block_on(future::join(connection, stdio_printer))
-        .0?;
+    let exit_code = TcpStream::connect(&addr)
+        .and_then(|stream| nails::client_handle_connection(stream, cmd, stdio_write, stdin_read))
+        .map_err(|e| format!("Error communicating with server: {}", e))
+        .await?;
+
+    stdio_printer
+        .await
+        .unwrap()
+        .map_err(|e| format!("Error flushing stdio: {}", e))?;
+
     debug!("Exiting with {}", exit_code.0);
     std::process::exit(exit_code.0);
 }
