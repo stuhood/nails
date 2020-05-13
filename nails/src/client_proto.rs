@@ -1,33 +1,16 @@
 use std::fmt::Debug;
 use std::io;
+use std::sync::Arc;
 
 use futures::channel::mpsc;
-use futures::{stream, Sink, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
-use log::debug;
+use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use log::{debug, trace};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Mutex;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
 use crate::execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
-
-#[derive(Debug)]
-enum Event {
-    Server(OutputChunk),
-    Cli(ChildInput),
-}
-
-#[derive(Debug)]
-struct ClientState<S: ServerSink>(S, mpsc::Sender<ChildOutput>);
-
-///
-/// Exiting via an exit code is an error condition, but we can only exit a `fold` via an error.
-///
-/// TODO: Why isn't there a loop_fn equivalent on Stream?
-///
-enum ClientError {
-    Dirty(io::Error),
-    Clean(ExitCode),
-}
 
 ///
 /// Converts a Command into the initialize chunks for the nailgun protocol. Note: order matters.
@@ -55,26 +38,19 @@ pub async fn execute<R, W>(
     read: R,
     write: W,
     cmd: Command,
-    output_sink: mpsc::Sender<ChildOutput>,
-    input_stream: mpsc::Receiver<ChildInput>,
+    cli_write: mpsc::Sender<ChildOutput>,
+    cli_read: mpsc::Receiver<ChildInput>,
 ) -> Result<ExitCode, io::Error>
 where
-    R: AsyncRead + Debug + Unpin + Send,
-    W: AsyncWrite + Debug + Unpin + Send,
+    R: AsyncRead + Debug + Unpin + Send + 'static,
+    W: AsyncWrite + Debug + Unpin + Send + 'static,
 {
     let server_read = FramedRead::new(read, ClientCodec);
     let mut server_write = FramedWrite::new(write, ClientCodec);
 
-    // Send all the init chunks:
+    // Send all of the init chunks.
     let mut init_chunks = futures::stream::iter(command_as_chunks(cmd).into_iter().map(Ok))
-        .inspect(|i| debug!("Client sending initialization chunk {:?}", i));
-
-    // Select on the two input sources to create a merged Stream of events.
-    let mut events_read = stream::select(
-        input_stream.map(|v| Ok(Event::Cli(v))),
-        server_read.map_ok(|e| Event::Server(e)),
-    );
-
+        .inspect(|i| debug!("nails client sending initialization chunk {:?}", i));
     server_write
         .send_all(&mut init_chunks)
         .map_err(|e| {
@@ -85,66 +61,83 @@ where
         })
         .await?;
 
-    let mut state = ClientState(server_write, output_sink);
-    while let Some(event) = events_read.next().await {
-        state = match step(state, event?).await {
-            Ok(s) => s,
-            Err(ClientError::Clean(code)) => return Ok(code),
-            Err(ClientError::Dirty(e)) => return Err(e),
-        };
+    // Then handle stdio until we receive an ExitCode.
+    let server_write = Arc::new(Mutex::new(server_write));
+    let exit_code_res = handle_stdio(server_read, server_write.clone(), cli_write, cli_read).await;
+    // TODO: Closing the write half of the `into_split` socket seemingly closes the entire socket,
+    // so we hold onto it here until the rest of the protocol has completed.
+    std::mem::drop(server_write);
+    exit_code_res
+}
+
+async fn handle_stdio<S: ServerSink>(
+    mut server_read: impl Stream<Item = Result<OutputChunk, io::Error>> + Unpin,
+    server_write: Arc<Mutex<S>>,
+    mut cli_write: mpsc::Sender<ChildOutput>,
+    cli_read: mpsc::Receiver<ChildInput>,
+) -> Result<ExitCode, io::Error> {
+    let mut stdin_inputs = Some((server_write, cli_read));
+    while let Some(output_chunk) = server_read.next().await {
+        match output_chunk? {
+            OutputChunk::Stderr(bytes) => {
+                trace!("nails client got {} bytes of stderr.", bytes.len());
+                cli_write
+                    .send(ChildOutput::Stderr(bytes))
+                    .map_err(|e| send_to_io(e))
+                    .await?;
+            }
+            OutputChunk::Stdout(bytes) => {
+                trace!("nails client got {} bytes of stdout.", bytes.len());
+                cli_write
+                    .send(ChildOutput::Stdout(bytes))
+                    .map_err(|e| send_to_io(e))
+                    .await?;
+            }
+            OutputChunk::StartReadingStdin => {
+                // We spawn a task to send stdin after receiving `StartReadingStdin`, but only
+                // once: some servers (ours included, optionally) have a `noisy_stdin` behaviour
+                // where they ask for more input after every Stdin chunk.
+                if let Some((server_write, cli_read)) = stdin_inputs.take() {
+                    debug!("nails client will start sending stdin.");
+                    let _join = tokio::spawn(stdin_sender(server_write, cli_read));
+                }
+            }
+            OutputChunk::Exit(code) => {
+                trace!("nails client got exit code: {}", code);
+                let code = ExitCode(code);
+                cli_write
+                    .send(ChildOutput::Exit(code))
+                    .map_err(|e| send_to_io(e))
+                    .await?;
+                return Ok(code);
+            }
+        }
     }
     Err(io_err(
         "Client exited before the server's result could be returned.",
     ))
 }
 
-async fn step<C: ServerSink>(
-    state: ClientState<C>,
-    ev: Event,
-) -> Result<ClientState<C>, ClientError> {
-    match (state, ev) {
-        (ClientState(server, mut cli), Event::Server(OutputChunk::Stderr(bytes))) => {
-            debug!("Client got {} bytes of stderr.", bytes.len());
-            cli.send(ChildOutput::Stderr(bytes))
-                .map_err(|e| ClientError::Dirty(send_to_io(e)))
-                .await?;
-            Ok(ClientState(server, cli))
-        }
-        (ClientState(server, mut cli), Event::Server(OutputChunk::Stdout(bytes))) => {
-            debug!("Client got {} bytes of stdout.", bytes.len());
-            cli.send(ChildOutput::Stdout(bytes))
-                .map_err(|e| ClientError::Dirty(send_to_io(e)))
-                .await?;
-            Ok(ClientState(server, cli))
-        }
-        (state, Event::Server(OutputChunk::StartReadingStdin)) => {
-            // TODO: What is the consequence of sending stdin before this chunk? For now we ignore
-            // it and send stdin chunks as they arrive.
-            Ok(state)
-        }
-        (ClientState(_, mut cli), Event::Server(OutputChunk::Exit(code))) => {
-            debug!("Client got exit code: {}", code);
-            let code = ExitCode(code);
-            cli.send(ChildOutput::Exit(code))
-                .map_err(|e| ClientError::Dirty(send_to_io(e)))
-                .await?;
-            Err(ClientError::Clean(code))
-        }
-        (ClientState(mut server, cli), Event::Cli(ChildInput::Stdin(bytes))) => {
-            server
-                .send(InputChunk::Stdin(bytes))
-                .map_err(ClientError::Dirty)
-                .await?;
-            Ok(ClientState(server, cli))
-        }
-        (ClientState(mut server, cli), Event::Cli(ChildInput::StdinEOF)) => {
-            server
-                .send(InputChunk::StdinEOF)
-                .map_err(ClientError::Dirty)
-                .await?;
-            Ok(ClientState(server, cli))
+async fn stdin_sender<S: ServerSink>(
+    server_write: Arc<Mutex<S>>,
+    mut cli_read: mpsc::Receiver<ChildInput>,
+) -> Result<(), io::Error> {
+    while let Some(input_chunk) = cli_read.next().await {
+        match input_chunk {
+            ChildInput::Stdin(bytes) => {
+                trace!("nails client sending {} bytes of stdin.", bytes.len());
+                let mut server_write = server_write.lock().await;
+                server_write.send(InputChunk::Stdin(bytes)).await?;
+            }
+            ChildInput::StdinEOF => {
+                trace!("nails client closing stdin.");
+                let mut server_write = server_write.lock().await;
+                server_write.send(InputChunk::StdinEOF).await?;
+                break;
+            }
         }
     }
+    Ok(())
 }
 
 fn io_err(e: &str) -> io::Error {
@@ -155,6 +148,6 @@ fn io_err(e: &str) -> io::Error {
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
 ///
  #[cfg_attr(rustfmt, rustfmt_skip)]
-trait ServerSink: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send {}
+trait ServerSink: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send + 'static {}
 #[cfg_attr(rustfmt, rustfmt_skip)]
-impl<T> ServerSink for T where T: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send {}
+impl<T> ServerSink for T where T: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send + 'static {}

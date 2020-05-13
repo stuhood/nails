@@ -59,13 +59,13 @@ pub async fn server_handle_connection<N: Nail>(
 }
 
 pub async fn client_handle_connection(
-    mut socket: TcpStream,
+    socket: TcpStream,
     cmd: Command,
     output_sink: mpsc::Sender<ChildOutput>,
     input_stream: mpsc::Receiver<ChildInput>,
 ) -> Result<ExitCode, io::Error> {
     socket.set_nodelay(true)?;
-    let (read, write) = socket.split();
+    let (read, write) = socket.into_split();
     client_proto::execute(read, write, cmd, output_sink, input_stream).await
 }
 
@@ -77,6 +77,8 @@ mod tests {
 
     use std::io;
     use std::path::PathBuf;
+
+    use log::error;
 
     use bytes::Bytes;
     use futures::channel::mpsc;
@@ -185,6 +187,7 @@ mod tests {
             mut input_stream: mpsc::Receiver<ChildInput>,
         ) -> Result<bool, io::Error> {
             tokio::spawn(async move {
+                error!("Server spawned thread!");
                 let input_bytes = match input_stream.next().await {
                     Some(ChildInput::Stdin(bytes)) => bytes,
                     x => panic!("Unexpected input: {:?}", x),
