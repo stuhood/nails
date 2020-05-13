@@ -1,6 +1,6 @@
 [package]
 name = "nails-fork"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Stu Hood <stuhood@gmail.com>"]
 license = "Apache-2.0"
 readme = "../README.md"
@@ -12,7 +12,7 @@ A `Nail` trait implementation that forks a process as the user running the serve
 edition = "2018"
 
 [dependencies]
-nails = { path = "../nails", version = "=0.5.0" }
+nails = { path = "../nails", version = "=0.5.1" }
 bytes = "0.5"
 futures = "0.3"
 tokio = { version = "0.2", features = ["rt-core", "process"] }
