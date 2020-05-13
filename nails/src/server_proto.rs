@@ -138,6 +138,11 @@ async fn stdio_input<C: ClientSink, N: super::Nail>(
     mut client_read: impl Stream<Item = Result<InputChunk, io::Error>> + Unpin,
     mut process_write: mpsc::Sender<ChildInput>,
 ) -> Result<(), io::Error> {
+    {
+        let mut client_write = client_write.lock().await;
+        client_write.send(OutputChunk::StartReadingStdin).await?;
+    }
+
     while let Some(input_chunk) = client_read.next().await {
         match input_chunk? {
             InputChunk::Stdin(bytes) => {
