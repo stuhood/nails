@@ -26,13 +26,13 @@ pub struct Command {
     pub working_dir: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ChildInput {
     Stdin(Bytes),
     StdinEOF,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ChildOutput {
     Stdout(Bytes),
     Stderr(Bytes),

@@ -73,20 +73,77 @@ pub async fn client_handle_connection(
 mod tests {
     use super::{client_handle_connection, server_handle_connection, Config, Nail};
 
+    use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
+
     use std::io;
     use std::path::PathBuf;
 
-    use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
+    use bytes::Bytes;
     use futures::channel::mpsc;
     use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt};
     use tokio::net::{TcpListener, TcpStream};
 
     #[tokio::test]
-    async fn roundtrip() {
+    async fn roundtrip_noop() {
         let expected_exit_code = ExitCode(67);
+        let addr = one_connection_server(Config::new(ConstantNail(expected_exit_code))).await;
 
-        // Launch a server that will accept one connection before exiting.
-        let config = Config::new(ConstantNail(expected_exit_code));
+        // This Nail will ignore the content of the command, so we're only validating the exit code.
+        let cmd = Command {
+            command: "nothing".to_owned(),
+            args: vec![],
+            env: vec![],
+            working_dir: PathBuf::from("/dev/null"),
+        };
+        let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
+        let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
+        let exit_code = TcpStream::connect(&addr)
+            .and_then(move |stream| client_handle_connection(stream, cmd, stdio_write, stdin_read))
+            .map_err(|e| format!("Error communicating with server: {}", e))
+            .await
+            .unwrap();
+
+        assert_eq!(expected_exit_code, exit_code);
+    }
+
+    #[tokio::test]
+    async fn roundtrip_echo() {
+        let addr = one_connection_server(Config::new(StdoutEchoNail)).await;
+
+        // This Nail ignores the command and echos one blob of stdin.
+        let cmd = Command {
+            command: "nothing".to_owned(),
+            args: vec![],
+            env: vec![],
+            working_dir: PathBuf::from("/dev/null"),
+        };
+        let (mut stdin_write, stdin_read) = child_channel::<ChildInput>();
+        let (stdio_write, mut stdio_read) = child_channel::<ChildOutput>();
+
+        // This channel has some buffer which we add to before actually launching the client.
+        let expected_bytes = Bytes::from("some bytes");
+        stdin_write
+            .send(ChildInput::Stdin(expected_bytes.clone()))
+            .await
+            .unwrap();
+        stdin_write.send(ChildInput::StdinEOF).await.unwrap();
+        let exit_code = TcpStream::connect(&addr)
+            .and_then(move |stream| client_handle_connection(stream, cmd, stdio_write, stdin_read))
+            .map_err(|e| format!("Error communicating with server: {}", e))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ChildOutput::Stdout(expected_bytes),
+            stdio_read.next().await.unwrap()
+        );
+        assert_eq!(ExitCode(0), exit_code);
+    }
+
+    ///
+    /// A server that is spawned into the background, accepts one connection and then exits.
+    ///
+    async fn one_connection_server<N: Nail>(config: Config<N>) -> std::net::SocketAddr {
         let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -96,23 +153,7 @@ mod tests {
             tokio::spawn(server_handle_connection(config.clone(), socket))
         });
 
-        // And connect with a client. This Nail will ignore the content of the command, so we're
-        // only validating the exit code.
-        let cmd = Command {
-            command: "nothing".to_owned(),
-            args: vec![],
-            env: vec![],
-            working_dir: PathBuf::from("/dev/null"),
-        };
-        let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
-        let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
-        let exit_code = TcpStream::connect(&addr)
-            .and_then(move |stream| client_handle_connection(stream, cmd, stdio_write, stdin_read))
-            .map_err(|e| format!("Error communicating with server: {}", e))
-            .await
-            .unwrap();
-
-        assert_eq!(expected_exit_code, exit_code);
+        addr
     }
 
     #[derive(Clone)]
@@ -128,6 +169,38 @@ mod tests {
             let code = self.0.clone();
             tokio::spawn(async move {
                 output_sink.send(ChildOutput::Exit(code)).map(|_| ()).await;
+            });
+            Ok(false)
+        }
+    }
+
+    #[derive(Clone)]
+    struct StdoutEchoNail;
+
+    impl Nail for StdoutEchoNail {
+        fn spawn(
+            &self,
+            _: Command,
+            mut output_sink: mpsc::Sender<ChildOutput>,
+            mut input_stream: mpsc::Receiver<ChildInput>,
+        ) -> Result<bool, io::Error> {
+            tokio::spawn(async move {
+                let input_bytes = match input_stream.next().await {
+                    Some(ChildInput::Stdin(bytes)) => bytes,
+                    x => panic!("Unexpected input: {:?}", x),
+                };
+                match input_stream.next().await {
+                    Some(ChildInput::StdinEOF) => (),
+                    x => panic!("Unexpected input: {:?}", x),
+                };
+                output_sink
+                    .send(ChildOutput::Stdout(input_bytes))
+                    .await
+                    .unwrap();
+                output_sink
+                    .send(ChildOutput::Exit(ExitCode(0)))
+                    .await
+                    .unwrap();
             });
             Ok(true)
         }
