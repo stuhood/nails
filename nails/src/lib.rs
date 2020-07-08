@@ -46,8 +46,8 @@ where
     /// cause the server to cancel/Drop the connection if a heartbeat message is not received at at
     /// least this frequency.
     ///
-    pub fn require_heartbeat(mut self, frequency: Option<Duration>) -> Self {
-        self.require_heartbeat_frequency = frequency;
+    pub fn require_heartbeat(mut self, frequency: Duration) -> Self {
+        self.require_heartbeat_frequency = Some(frequency);
         self
     }
 }
@@ -94,6 +94,7 @@ mod tests {
 
     use std::io;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use log::error;
 
@@ -101,26 +102,29 @@ mod tests {
     use futures::channel::mpsc;
     use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::delay_for;
 
     #[tokio::test]
     async fn roundtrip_noop() {
         let expected_exit_code = ExitCode(67);
-        let addr = one_connection_server(Config::new(ConstantNail(expected_exit_code))).await;
+        let addr = one_connection_server(Config::new(ConstantNail(
+            Duration::from_millis(5),
+            expected_exit_code,
+        )))
+        .await;
 
         // This Nail will ignore the content of the command, so we're only validating the exit code.
-        let cmd = Command {
-            command: "nothing".to_owned(),
-            args: vec![],
-            env: vec![],
-            working_dir: PathBuf::from("/dev/null"),
-        };
-        let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
-        let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
-        let exit_code = TcpStream::connect(&addr)
-            .and_then(move |stream| client_handle_connection(stream, cmd, stdio_write, stdin_read))
-            .map_err(|e| format!("Error communicating with server: {}", e))
-            .await
-            .unwrap();
+        let exit_code = send_with_no_stdio(
+            addr,
+            Command {
+                command: "nothing".to_owned(),
+                args: vec![],
+                env: vec![],
+                working_dir: PathBuf::from("/dev/null"),
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(expected_exit_code, exit_code);
     }
@@ -159,6 +163,33 @@ mod tests {
         assert_eq!(ExitCode(0), exit_code);
     }
 
+    #[tokio::test]
+    async fn roundtrip_heartbeat_enforced_success() {
+        // Enforcing a heartbeat timeout shorter than the nail's total runtime, but with a client and
+        // server in alignment on heartbeats should succeed.
+        let heartbeat_frequency = Duration::from_millis(100);
+        let expected_exit_code = ExitCode(67);
+        let addr = one_connection_server(
+            Config::new(ConstantNail(heartbeat_frequency * 5, expected_exit_code))
+                .require_heartbeat(heartbeat_frequency),
+        )
+        .await;
+
+        let exit_code = send_with_no_stdio(
+            addr,
+            Command {
+                command: "nothing".to_owned(),
+                args: vec![],
+                env: vec![],
+                working_dir: PathBuf::from("/dev/null"),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(expected_exit_code, exit_code);
+    }
+
     ///
     /// A server that is spawned into the background, accepts one connection and then exits.
     ///
@@ -175,8 +206,28 @@ mod tests {
         addr
     }
 
+    ///
+    /// Send the given command, expecting no stdio in or out.
+    ///
+    async fn send_with_no_stdio(
+        addr: std::net::SocketAddr,
+        command: Command,
+    ) -> Result<ExitCode, String> {
+        let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
+        let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
+        TcpStream::connect(&addr)
+            .and_then(move |stream| {
+                client_handle_connection(stream, command, stdio_write, stdin_read)
+            })
+            .map_err(|e| format!("Error communicating with server: {}", e))
+            .await
+    }
+
+    ///
+    /// A Nail that sleeps for the given duration, and then returns the given ExitCode.
+    ///
     #[derive(Clone)]
-    struct ConstantNail(ExitCode);
+    struct ConstantNail(Duration, ExitCode);
 
     impl Nail for ConstantNail {
         fn spawn(
@@ -185,9 +236,13 @@ mod tests {
             mut output_sink: mpsc::Sender<ChildOutput>,
             _: mpsc::Receiver<ChildInput>,
         ) -> Result<bool, io::Error> {
-            let code = self.0.clone();
+            let nail = self.clone();
             tokio::spawn(async move {
-                output_sink.send(ChildOutput::Exit(code)).map(|_| ()).await;
+                delay_for(nail.0).await;
+                output_sink
+                    .send(ChildOutput::Exit(nail.1))
+                    .map(|_| ())
+                    .await;
             });
             Ok(false)
         }
