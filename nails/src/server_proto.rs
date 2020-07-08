@@ -2,11 +2,13 @@ use std::fmt::Debug;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::channel::mpsc;
 use futures::{future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{watch, Mutex};
+use tokio::time::timeout;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{InputChunk, OutputChunk, ServerCodec};
@@ -136,6 +138,7 @@ async fn stdio_output<C: ClientSink>(
     mut exit_read: watch::Receiver<()>,
 ) -> Result<(), io::Error> {
     loop {
+        // TODO: see if either of the boxes can be removed.
         let child_output =
             match future::select(process_read.next().boxed(), exit_read.recv().boxed()).await {
                 future::Either::Left((Some(child_output), _)) => child_output,
@@ -185,8 +188,24 @@ async fn client_input<C: ClientSink, N: super::Nail>(
         client_write.send(OutputChunk::StartReadingStdin).await?;
     }
 
-    while let Some(input_chunk) = client_read.next().await {
-        match input_chunk? {
+    loop {
+        let input_chunk =
+            match read_client_chunk(&mut client_read, config.require_heartbeat_frequency).await {
+                Some(Ok(input_chunk)) => input_chunk,
+                Some(Err(e)) => {
+                    // NB: This would happen anyway, but dropping the watch is what actually signals
+                    // exit, so we do it explicitly.
+                    std::mem::drop(exit_write);
+                    break Err(e);
+                }
+                None => {
+                    // Socket closed cleanly.
+                    break Ok(());
+                }
+            };
+
+        // We have a valid chunk.
+        match input_chunk {
             InputChunk::Stdin(bytes) => {
                 if let Some(ref mut process_write) = maybe_process_write {
                     process_write
@@ -221,7 +240,29 @@ async fn client_input<C: ClientSink, N: super::Nail>(
             }
         }
     }
-    Ok(())
+}
+
+///
+/// Read a single chunk from the client, optionally applying a heartbeat frequency (ie, timeout).
+/// Any message at all is sufficient to reset the clock on the heartbeat.
+///
+/// None indicates a cleanly closed connection.
+///
+async fn read_client_chunk(
+    client_read: &mut (impl Stream<Item = Result<InputChunk, io::Error>> + Unpin),
+    require_heartbeat_frequency: Option<Duration>,
+) -> Option<Result<InputChunk, io::Error>> {
+    if let Some(per_msg_timeout) = require_heartbeat_frequency {
+        match timeout(per_msg_timeout, client_read.next()).await {
+            Ok(opt) => opt,
+            Err(_) => Some(Err(err(&format!(
+                "Did not receive a heartbeat (or any other message) within {:?}",
+                per_msg_timeout
+            )))),
+        }
+    } else {
+        client_read.next().await
+    }
 }
 
 pub fn err(e: &str) -> io::Error {
