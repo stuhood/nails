@@ -5,6 +5,7 @@ use env_logger;
 use std::env;
 use std::io;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use futures::channel::mpsc;
 use futures::{SinkExt, Stream, StreamExt, TryFutureExt};
@@ -89,6 +90,10 @@ async fn main() -> Result<(), String> {
         working_dir,
     };
 
+    // TODO: This aligns with the C client. Possible that the default client and server configs
+    // should be different in order to be maximally lenient.
+    let config = nails::Config::default().heartbeat_frequency(Duration::from_millis(500));
+
     // Spawn tasks to read stdout/stderr and write stdin.
     let (stdio_write, stdio_read) = child_channel::<ChildOutput>();
     let (stdin_write, stdin_read) = child_channel::<ChildInput>();
@@ -98,7 +103,9 @@ async fn main() -> Result<(), String> {
     // And handle the connection in the foreground.
     debug!("Connecting to server at {}...", addr);
     let exit_code = TcpStream::connect(&addr)
-        .and_then(|stream| nails::client_handle_connection(stream, cmd, stdio_write, stdin_read))
+        .and_then(|stream| {
+            nails::client_handle_connection(config, stream, cmd, stdio_write, stdin_read)
+        })
         .map_err(|e| format!("Error communicating with server: {}", e))
         .await?;
 

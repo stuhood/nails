@@ -1,16 +1,19 @@
 use std::fmt::Debug;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use futures::channel::mpsc;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use log::{debug, trace};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
+use tokio::time::delay_for;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
 use crate::execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
+use crate::Config;
 
 ///
 /// Converts a Command into the initialize chunks for the nailgun protocol. Note: order matters.
@@ -35,6 +38,7 @@ fn command_as_chunks(cmd: Command) -> Vec<InputChunk> {
 }
 
 pub async fn execute<R, W>(
+    config: Config,
     read: R,
     write: W,
     cmd: Command,
@@ -61,8 +65,16 @@ where
         })
         .await?;
 
-    // Then handle stdio until we receive an ExitCode.
+    // If configured, spawn a task to send heartbeats.
     let server_write = Arc::new(Mutex::new(server_write));
+    if let Some(heartbeat_frequency) = config.heartbeat_frequency {
+        let _join = tokio::spawn(heartbeat_sender(
+            Arc::downgrade(&server_write),
+            heartbeat_frequency,
+        ));
+    }
+
+    // Then handle stdio until we receive an ExitCode.
     let exit_code_res = handle_stdio(server_read, server_write.clone(), cli_write, cli_read).await;
     // TODO: Closing the write half of the `into_split` socket seemingly closes the entire socket,
     // so we hold onto it here until the rest of the protocol has completed.
@@ -138,6 +150,25 @@ async fn stdin_sender<S: ServerSink>(
         }
     }
     Ok(())
+}
+
+async fn heartbeat_sender<S: ServerSink>(
+    server_write: Weak<Mutex<S>>,
+    heartbeat_frequency: Duration,
+) -> Result<(), io::Error> {
+    loop {
+        // Wait a fraction of the desired frequency (which from a client's perspective is a
+        // minimum: more frequent is fine).
+        delay_for(heartbeat_frequency / 4).await;
+
+        // Then, if the connection might still be alive...
+        if let Some(server_write) = server_write.upgrade() {
+            let mut server_write = server_write.lock().await;
+            server_write.send(InputChunk::Heartbeat).await?;
+        } else {
+            break Ok(());
+        };
+    }
 }
 
 fn io_err(e: &str) -> io::Error {
