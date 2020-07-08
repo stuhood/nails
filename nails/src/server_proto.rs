@@ -6,7 +6,7 @@ use std::sync::Arc;
 use futures::channel::mpsc;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{InputChunk, OutputChunk, ServerCodec};
@@ -35,6 +35,11 @@ where
         }
     };
 
+    // A watch that is used to signal to the stdio tasks that the run is exiting early. The channel
+    // is a Unit watch because the only way it is used is by dropping the write side to signal
+    // hangup on the read side(s) for each task.
+    let (exit_write, exit_read) = watch::channel(());
+
     // Create channels for stdio with the forked subprocess, and spawn the process.
     let (process_write, process_read) = child_channel::<ChildOutput>();
     let (stdin_write, stdin_read) = child_channel::<ChildInput>();
@@ -49,21 +54,38 @@ where
         }
     };
 
-    // If the Nail indicated that we should read stdin, spawn a task to do so.
+    // Spawn a task to consume client inputs, which might include any combination of heartbeat and
+    // stdin messages.
     let client_write = Arc::new(Mutex::new(client_write));
-    if should_send_stdin {
-        let _join = tokio::spawn(stdio_input(
-            config.clone(),
-            client_write.clone(),
-            client_read,
-            stdin_write,
-        ));
+    let maybe_stdin_write = if should_send_stdin {
+        Some(stdin_write)
     } else {
         std::mem::drop(stdin_write);
-    }
+        None
+    };
+    let _join = tokio::spawn({
+        let client_write = client_write.clone();
+        async move {
+            let result = client_input(
+                config.clone(),
+                client_write.clone(),
+                client_read,
+                maybe_stdin_write,
+                exit_write,
+            )
+            .await;
+            if let Err(e) = result {
+                let mut client_write = client_write.lock().await;
+                let _ = client_write
+                    .send(OutputChunk::Stderr(e.to_string().into()))
+                    .await;
+                let _ = client_write.send(OutputChunk::Exit(1)).await;
+            }
+        }
+    });
 
     // Loop writing stdout/stderr to the client.
-    stdio_output(process_read, client_write).await
+    stdio_output(process_read, client_write, exit_read.clone()).await
 }
 
 ///
@@ -93,6 +115,7 @@ async fn initialize(
                     working_dir,
                 });
             }
+            InputChunk::Heartbeat => {}
             c => {
                 return Err(format!(
                     "The client sent an unexpected chunk during initialization: {:?}",
@@ -110,6 +133,7 @@ async fn initialize(
 async fn stdio_output<C: ClientSink>(
     mut process_read: mpsc::Receiver<ChildOutput>,
     client_write: Arc<Mutex<C>>,
+    exit_read: watch::Receiver<()>,
 ) -> Result<(), io::Error> {
     while let Some(child_output) = process_read.next().await {
         let exited = match child_output {
@@ -129,16 +153,18 @@ async fn stdio_output<C: ClientSink>(
 }
 
 ///
-/// If the Nail has indicated that we should handle stdin, reads it from the socket and sends it to
-/// the process.
+/// Reads client inputs, including heartbeat (optionally validated) and stdin messages (optionally
+/// accepted).
 ///
-async fn stdio_input<C: ClientSink, N: super::Nail>(
+async fn client_input<C: ClientSink, N: super::Nail>(
     config: super::Config<N>,
     client_write: Arc<Mutex<C>>,
     mut client_read: impl Stream<Item = Result<InputChunk, io::Error>> + Unpin,
-    mut process_write: mpsc::Sender<ChildInput>,
+    mut maybe_process_write: Option<mpsc::Sender<ChildInput>>,
+    exit_write: watch::Sender<()>,
 ) -> Result<(), io::Error> {
-    {
+    // If the process will accept stdin, send the StartReadingStdin chunk.
+    if maybe_process_write.is_some() {
         let mut client_write = client_write.lock().await;
         client_write.send(OutputChunk::StartReadingStdin).await?;
     }
@@ -146,24 +172,31 @@ async fn stdio_input<C: ClientSink, N: super::Nail>(
     while let Some(input_chunk) = client_read.next().await {
         match input_chunk? {
             InputChunk::Stdin(bytes) => {
-                let noisy_stdin = config.noisy_stdin;
-                process_write
-                    .send(ChildInput::Stdin(bytes))
-                    .map_err(send_to_io)
-                    .await?;
-                // If noisy_stdin is configured, we respond to every new chunk with `StartReadingStdin`.
-                if noisy_stdin {
-                    let mut client_write = client_write.lock().await;
-                    client_write.send(OutputChunk::StartReadingStdin).await?;
+                if let Some(ref mut process_write) = maybe_process_write {
+                    process_write
+                        .send(ChildInput::Stdin(bytes))
+                        .map_err(send_to_io)
+                        .await?;
+                    // If noisy_stdin is configured, we respond to every new chunk with `StartReadingStdin`.
+                    if config.noisy_stdin {
+                        let mut client_write = client_write.lock().await;
+                        client_write.send(OutputChunk::StartReadingStdin).await?;
+                    }
+                } else {
+                    return Err(err(&format!("The StartReadingStdin chunk was not sent: did not expect to receive stdin.")));
                 }
             }
             InputChunk::StdinEOF => {
-                process_write
-                    .send(ChildInput::StdinEOF)
-                    .map_err(send_to_io)
-                    .await?;
-                break;
+                if let Some(ref mut process_write) = maybe_process_write {
+                    process_write
+                        .send(ChildInput::StdinEOF)
+                        .map_err(send_to_io)
+                        .await?;
+                } else {
+                    return Err(err(&format!("The StartReadingStdin chunk was not sent: did not expect to receive stdin.")));
+                }
             }
+            InputChunk::Heartbeat => {}
             c => {
                 return Err(err(&format!(
                     "The client sent an unexpected chunk after initialization: {:?}",

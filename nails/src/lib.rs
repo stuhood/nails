@@ -5,6 +5,7 @@ mod server_proto;
 
 use futures::channel::mpsc;
 use std::io;
+use std::time::Duration;
 use tokio::net::TcpStream;
 
 use crate::execution::{ChildInput, ChildOutput, Command, ExitCode};
@@ -13,6 +14,7 @@ use crate::execution::{ChildInput, ChildOutput, Command, ExitCode};
 pub struct Config<N: Nail> {
     nail: N,
     noisy_stdin: bool,
+    require_heartbeat_frequency: Option<Duration>,
 }
 
 impl<N> Config<N>
@@ -23,14 +25,29 @@ where
         Config {
             nail,
             noisy_stdin: true,
+            require_heartbeat_frequency: None,
         }
     }
 
+    ///
     /// Although it is not part of the spec, the Python and C clients require that
     /// `StartReadingStdin` is sent after every stdin chunk has been consumed.
     ///   see https://github.com/facebook/nailgun/issues/88
+    ///
     pub fn noisy_stdin(mut self, value: bool) -> Self {
         self.noisy_stdin = value;
+        self
+    }
+
+    ///
+    /// The "heartbeat" is an optional protocol extension, and is a chunk type sent by the client to
+    /// the server to indicate that the client is still waiting for a result. By default, the
+    /// server will not require that heartbeat messages are received, but setting a value here will
+    /// cause the server to cancel/Drop the connection if a heartbeat message is not received at at
+    /// least this frequency.
+    ///
+    pub fn require_heartbeat(mut self, frequency: Option<Duration>) -> Self {
+        self.require_heartbeat_frequency = frequency;
         self
     }
 }
