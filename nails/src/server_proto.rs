@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::channel::mpsc;
-use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use futures::{future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{watch, Mutex};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -85,7 +85,7 @@ where
     });
 
     // Loop writing stdout/stderr to the client.
-    stdio_output(process_read, client_write, exit_read.clone()).await
+    stdio_output(process_read, client_write, exit_read).await
 }
 
 ///
@@ -133,10 +133,28 @@ async fn initialize(
 async fn stdio_output<C: ClientSink>(
     mut process_read: mpsc::Receiver<ChildOutput>,
     client_write: Arc<Mutex<C>>,
-    exit_read: watch::Receiver<()>,
+    mut exit_read: watch::Receiver<()>,
 ) -> Result<(), io::Error> {
-    while let Some(child_output) = process_read.next().await {
-        let exited = match child_output {
+    loop {
+        let child_output =
+            match future::select(process_read.next().boxed(), exit_read.recv().boxed()).await {
+                future::Either::Left((Some(child_output), _)) => child_output,
+                future::Either::Left((None, _)) => {
+                    // Process exited without sending an exit code... strange, but not fatal.
+                    break Ok(());
+                }
+                future::Either::Right((Some(_), _)) => {
+                    // Spurious wakeup for exit_read: ignore.
+                    continue;
+                }
+                future::Either::Right((None, _)) => {
+                    // Early exit was signaled via `exit_read`.
+                    break Ok(());
+                }
+            };
+
+        // We have a valid child output to send.
+        let exiting = match child_output {
             ChildOutput::Exit(_) => true,
             _ => false,
         };
@@ -144,12 +162,10 @@ async fn stdio_output<C: ClientSink>(
             let mut client_write = client_write.lock().await;
             client_write.send(child_output.into()).await?;
         }
-        if exited {
+        if exiting {
             return Ok(());
         }
     }
-    // Process exited without sending an exit code... strange, but not fatal.
-    Ok(())
 }
 
 ///
