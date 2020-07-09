@@ -97,11 +97,8 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_noop() {
         let expected_exit_code = ExitCode(67);
-        let addr = one_connection_server(
-            Config::default(),
-            ConstantNail(Duration::from_millis(5), expected_exit_code),
-        )
-        .await;
+        let addr =
+            one_connection_server(Config::default(), ConstantNail(None, expected_exit_code)).await;
 
         // This Nail will ignore the content of the command, so we're only validating the exit code.
         let exit_code = send_with_no_stdio(
@@ -157,19 +154,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn roundtrip_heartbeat_enforced_success() {
-        // Enforcing a heartbeat timeout shorter than the nail's total runtime, but with a client and
-        // server in alignment on heartbeats should succeed.
-        let heartbeat_frequency = Duration::from_millis(100);
-        let expected_exit_code = ExitCode(67);
-        let addr = one_connection_server(
-            Config::default().heartbeat_frequency(heartbeat_frequency),
-            ConstantNail(heartbeat_frequency * 5, expected_exit_code),
+    async fn roundtrip_heartbeat_success() {
+        // Enforcing a heartbeat timeout shorter than the nail's total runtime should succeed if the
+        // client and server are in alignment on heartbeats.
+        let config = Config::default().heartbeat_frequency(Duration::from_millis(100));
+        roundtrip_heartbeat(config.clone(), config, true).await;
+    }
+
+    #[tokio::test]
+    async fn roundtrip_heartbeat_failure() {
+        // Enforcing a heartbeat timeout shorter than the nail's total runtime should fail if the
+        // client is not sending heartbeats, but the server is requiring them.
+        roundtrip_heartbeat(
+            Config::default(),
+            Config::default().heartbeat_frequency(Duration::from_millis(100)),
+            false,
         )
         .await;
+    }
+
+    async fn roundtrip_heartbeat(
+        client_config: Config,
+        server_config: Config,
+        expect_success: bool,
+    ) {
+        // Ask the nail to run for a multiple of the heartbeat frequency, so that multiple
+        // heartbeats are required to succeed.
+        let nail_delay = server_config.heartbeat_frequency.map(|f| f * 4);
+        let success_exit_code = ExitCode(67);
+        let addr =
+            one_connection_server(server_config, ConstantNail(nail_delay, success_exit_code)).await;
 
         let exit_code = send_with_no_stdio(
-            Config::default(),
+            client_config,
             addr,
             Command {
                 command: "nothing".to_owned(),
@@ -181,7 +198,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(expected_exit_code, exit_code);
+        if expect_success {
+            assert_eq!(success_exit_code, exit_code);
+        } else {
+            assert_eq!(ExitCode(1), exit_code);
+        }
     }
 
     ///
@@ -222,7 +243,7 @@ mod tests {
     /// A Nail that sleeps for the given duration, and then returns the given ExitCode.
     ///
     #[derive(Clone)]
-    struct ConstantNail(Duration, ExitCode);
+    struct ConstantNail(Option<Duration>, ExitCode);
 
     impl Nail for ConstantNail {
         fn spawn(
@@ -233,7 +254,9 @@ mod tests {
         ) -> Result<bool, io::Error> {
             let nail = self.clone();
             tokio::spawn(async move {
-                delay_for(nail.0).await;
+                if let Some(delay_duration) = nail.0 {
+                    delay_for(delay_duration).await;
+                }
                 output_sink
                     .send(ChildOutput::Exit(nail.1))
                     .map(|_| ())
