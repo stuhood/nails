@@ -7,7 +7,8 @@ use nails_fork::ForkNail;
 
 #[tokio::main]
 async fn main() {
-    let config = nails::Config::new(ForkNail);
+    let config = nails::Config::default();
+    let nail = ForkNail;
 
     let mut listener = TcpListener::bind("127.0.0.1:2113").await.unwrap();
     println!("Bound listener: {:?}", listener);
@@ -16,6 +17,7 @@ async fn main() {
         println!("Got connection: {:?}", socket);
         tokio::spawn(nails::server_handle_connection(
             config.clone(),
+            nail.clone(),
             socket.unwrap(),
         ));
     }

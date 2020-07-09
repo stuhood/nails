@@ -13,15 +13,20 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{InputChunk, OutputChunk, ServerCodec};
 use crate::execution::{child_channel, send_to_io, Args, ChildInput, ChildOutput, Command, Env};
+use crate::{Config, Nail};
 
 ///
 /// Executes the nailgun protocol. Returns success for everything except socket errors.
 ///
-pub async fn execute<R, W, N>(read: R, write: W, config: super::Config<N>) -> Result<(), io::Error>
+pub async fn execute<R, W>(
+    config: Config,
+    nail: impl Nail,
+    read: R,
+    write: W,
+) -> Result<(), io::Error>
 where
     R: AsyncRead + Debug + Unpin + Send + 'static,
     W: AsyncWrite + Debug + Unpin + Send + 'static,
-    N: super::Nail,
 {
     // Split the client transport into write and read portions.
     let mut client_read = FramedRead::new(read, ServerCodec);
@@ -46,7 +51,7 @@ where
     let (process_write, process_read) = child_channel::<ChildOutput>();
     let (stdin_write, stdin_read) = child_channel::<ChildInput>();
     let command_desc = command.command.clone();
-    let should_send_stdin = match config.nail.spawn(command, process_write, stdin_read) {
+    let should_send_stdin = match nail.spawn(command, process_write, stdin_read) {
         Ok(should_send_stdin) => should_send_stdin,
         Err(e) => {
             let e = format!("Failed to launch child `{}`: {:?}\n", command_desc, e);
@@ -175,8 +180,8 @@ async fn stdio_output<C: ClientSink>(
 /// Reads client inputs, including heartbeat (optionally validated) and stdin messages (optionally
 /// accepted).
 ///
-async fn client_input<C: ClientSink, N: super::Nail>(
-    config: super::Config<N>,
+async fn client_input<C: ClientSink>(
+    config: Config,
     client_write: Arc<Mutex<C>>,
     mut client_read: impl Stream<Item = Result<InputChunk, io::Error>> + Unpin,
     mut maybe_process_write: Option<mpsc::Sender<ChildInput>>,
@@ -190,7 +195,7 @@ async fn client_input<C: ClientSink, N: super::Nail>(
 
     loop {
         let input_chunk =
-            match read_client_chunk(&mut client_read, config.require_heartbeat_frequency).await {
+            match read_client_chunk(&mut client_read, config.heartbeat_frequency).await {
                 Some(Ok(input_chunk)) => input_chunk,
                 Some(Err(e)) => {
                     // NB: This would happen anyway, but dropping the watch is what actually signals

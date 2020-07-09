@@ -10,25 +10,13 @@ use tokio::net::TcpStream;
 
 use crate::execution::{ChildInput, ChildOutput, Command, ExitCode};
 
-#[derive(Clone)]
-pub struct Config<N: Nail> {
-    nail: N,
+#[derive(Default, Clone)]
+pub struct Config {
     noisy_stdin: bool,
-    require_heartbeat_frequency: Option<Duration>,
+    heartbeat_frequency: Option<Duration>,
 }
 
-impl<N> Config<N>
-where
-    N: Nail,
-{
-    pub fn new(nail: N) -> Config<N> {
-        Config {
-            nail,
-            noisy_stdin: true,
-            require_heartbeat_frequency: None,
-        }
-    }
-
+impl Config {
     ///
     /// Although it is not part of the spec, the Python and C clients require that
     /// `StartReadingStdin` is sent after every stdin chunk has been consumed.
@@ -46,8 +34,8 @@ where
     /// cause the server to cancel/Drop the connection if a heartbeat message is not received at at
     /// least this frequency.
     ///
-    pub fn require_heartbeat(mut self, frequency: Duration) -> Self {
-        self.require_heartbeat_frequency = Some(frequency);
+    pub fn heartbeat_frequency(mut self, frequency: Duration) -> Self {
+        self.heartbeat_frequency = Some(frequency);
         self
     }
 }
@@ -65,17 +53,19 @@ pub trait Nail: Clone + Send + Sync + 'static {
     ) -> Result<bool, io::Error>;
 }
 
-pub async fn server_handle_connection<N: Nail>(
-    config: Config<N>,
+pub async fn server_handle_connection(
+    config: Config,
+    nail: impl Nail,
     socket: TcpStream,
 ) -> Result<(), io::Error> {
     socket.set_nodelay(true)?;
     let (read, write) = socket.into_split();
-    server_proto::execute(read, write, config).await?;
+    server_proto::execute(config, nail, read, write).await?;
     Ok(())
 }
 
 pub async fn client_handle_connection(
+    config: Config,
     socket: TcpStream,
     cmd: Command,
     output_sink: mpsc::Sender<ChildOutput>,
@@ -83,7 +73,7 @@ pub async fn client_handle_connection(
 ) -> Result<ExitCode, io::Error> {
     socket.set_nodelay(true)?;
     let (read, write) = socket.into_split();
-    client_proto::execute(read, write, cmd, output_sink, input_stream).await
+    client_proto::execute(config, read, write, cmd, output_sink, input_stream).await
 }
 
 #[cfg(test)]
@@ -107,14 +97,15 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_noop() {
         let expected_exit_code = ExitCode(67);
-        let addr = one_connection_server(Config::new(ConstantNail(
-            Duration::from_millis(5),
-            expected_exit_code,
-        )))
+        let addr = one_connection_server(
+            Config::default(),
+            ConstantNail(Duration::from_millis(5), expected_exit_code),
+        )
         .await;
 
         // This Nail will ignore the content of the command, so we're only validating the exit code.
         let exit_code = send_with_no_stdio(
+            Config::default(),
             addr,
             Command {
                 command: "nothing".to_owned(),
@@ -131,7 +122,7 @@ mod tests {
 
     #[tokio::test]
     async fn roundtrip_echo() {
-        let addr = one_connection_server(Config::new(StdoutEchoNail)).await;
+        let addr = one_connection_server(Config::default(), StdoutEchoNail).await;
 
         // This Nail ignores the command and echos one blob of stdin.
         let cmd = Command {
@@ -151,7 +142,9 @@ mod tests {
             .unwrap();
         stdin_write.send(ChildInput::StdinEOF).await.unwrap();
         let exit_code = TcpStream::connect(&addr)
-            .and_then(move |stream| client_handle_connection(stream, cmd, stdio_write, stdin_read))
+            .and_then(move |stream| {
+                client_handle_connection(Config::default(), stream, cmd, stdio_write, stdin_read)
+            })
             .map_err(|e| format!("Error communicating with server: {}", e))
             .await
             .unwrap();
@@ -170,12 +163,13 @@ mod tests {
         let heartbeat_frequency = Duration::from_millis(100);
         let expected_exit_code = ExitCode(67);
         let addr = one_connection_server(
-            Config::new(ConstantNail(heartbeat_frequency * 5, expected_exit_code))
-                .require_heartbeat(heartbeat_frequency),
+            Config::default().heartbeat_frequency(heartbeat_frequency),
+            ConstantNail(heartbeat_frequency * 5, expected_exit_code),
         )
         .await;
 
         let exit_code = send_with_no_stdio(
+            Config::default(),
             addr,
             Command {
                 command: "nothing".to_owned(),
@@ -193,14 +187,14 @@ mod tests {
     ///
     /// A server that is spawned into the background, accepts one connection and then exits.
     ///
-    async fn one_connection_server<N: Nail>(config: Config<N>) -> std::net::SocketAddr {
+    async fn one_connection_server(config: Config, nail: impl Nail) -> std::net::SocketAddr {
         let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
             let socket = listener.incoming().next().await.unwrap().unwrap();
             println!("Got connection: {:?}", socket);
-            tokio::spawn(server_handle_connection(config.clone(), socket))
+            tokio::spawn(server_handle_connection(config.clone(), nail, socket))
         });
 
         addr
@@ -210,6 +204,7 @@ mod tests {
     /// Send the given command, expecting no stdio in or out.
     ///
     async fn send_with_no_stdio(
+        config: Config,
         addr: std::net::SocketAddr,
         command: Command,
     ) -> Result<ExitCode, String> {
@@ -217,7 +212,7 @@ mod tests {
         let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
         TcpStream::connect(&addr)
             .and_then(move |stream| {
-                client_handle_connection(stream, command, stdio_write, stdin_read)
+                client_handle_connection(config, stream, command, stdio_write, stdin_read)
             })
             .map_err(|e| format!("Error communicating with server: {}", e))
             .await

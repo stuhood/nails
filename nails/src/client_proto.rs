@@ -11,6 +11,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
 use crate::execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
+use crate::Config;
 
 ///
 /// Converts a Command into the initialize chunks for the nailgun protocol. Note: order matters.
@@ -35,6 +36,7 @@ fn command_as_chunks(cmd: Command) -> Vec<InputChunk> {
 }
 
 pub async fn execute<R, W>(
+    config: Config,
     read: R,
     write: W,
     cmd: Command,
