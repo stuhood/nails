@@ -78,7 +78,7 @@ where
             if let Err(e) = result {
                 let mut client_write = client_write.lock().await;
                 let _ = client_write
-                    .send(OutputChunk::Stderr(e.to_string().into()))
+                    .send(OutputChunk::Stderr(format!("{}\n\n", e).into()))
                     .await;
                 let _ = client_write.send(OutputChunk::Exit(1)).await;
             }
