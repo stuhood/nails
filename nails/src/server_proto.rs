@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use futures::{future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use futures::stream::BoxStream;
+use futures::{future, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::timeout;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -42,17 +43,15 @@ where
         }
     };
 
-    // A watch that is used to signal to the stdio tasks that the run is exiting early. The channel
-    // is a Unit watch because the only way it is used is by dropping the write side to signal
-    // hangup on the read side(s) for each task.
-    let (exit_write, exit_read) = watch::channel(());
+    // Used for the input task (which monitors heartbeats) to notify the output task that the run
+    // is exiting early.
+    let (exit_write, exit_read) = oneshot::channel();
 
     // Create channels for stdio with the forked subprocess, and spawn the process.
-    let (process_write, process_read) = child_channel::<ChildOutput>();
     let (stdin_write, stdin_read) = child_channel::<ChildInput>();
     let command_desc = command.command.clone();
-    let should_send_stdin = match nail.spawn(command, process_write, stdin_read) {
-        Ok(should_send_stdin) => should_send_stdin,
+    let (accept_stdin, process_read) = match nail.spawn(command, stdin_read) {
+        Ok(child) => (child.accepts_stdin, child.output_stream),
         Err(e) => {
             let e = format!("Failed to launch child `{}`: {:?}\n", command_desc, e);
             client_write.send(OutputChunk::Stderr(e.into())).await?;
@@ -64,20 +63,15 @@ where
     // Spawn a task to consume client inputs, which might include any combination of heartbeat and
     // stdin messages.
     let client_write = Arc::new(Mutex::new(client_write));
-    let maybe_stdin_write = if should_send_stdin {
-        Some(stdin_write)
-    } else {
-        std::mem::drop(stdin_write);
-        None
-    };
     let _join = tokio::spawn({
         let client_write = client_write.clone();
         async move {
-            let result = client_input(
+            let result = input(
                 config.clone(),
+                accept_stdin,
                 client_write.clone(),
                 client_read,
-                maybe_stdin_write,
+                stdin_write,
                 exit_write,
             )
             .await;
@@ -92,7 +86,7 @@ where
     });
 
     // Loop writing stdout/stderr to the client.
-    stdio_output(process_read, client_write, exit_read).await
+    output(process_read, client_write, exit_read).await
 }
 
 ///
@@ -137,29 +131,26 @@ async fn initialize(
 ///
 /// Handles reading stdio from the child process and writing it to the client socket.
 ///
-async fn stdio_output<C: ClientSink>(
-    mut process_read: mpsc::Receiver<ChildOutput>,
+async fn output<C: ClientSink>(
+    mut process_read: BoxStream<'_, ChildOutput>,
     client_write: Arc<Mutex<C>>,
-    mut exit_read: watch::Receiver<()>,
+    mut exit_read: oneshot::Receiver<()>,
 ) -> Result<(), io::Error> {
     loop {
-        // TODO: see if either of the boxes can be removed.
-        let child_output =
-            match future::select(process_read.next().boxed(), exit_read.recv().boxed()).await {
-                future::Either::Left((Some(child_output), _)) => child_output,
-                future::Either::Left((None, _)) => {
-                    // Process exited without sending an exit code... strange, but not fatal.
-                    break Ok(());
-                }
-                future::Either::Right((Some(_), _)) => {
-                    // Spurious wakeup for exit_read: ignore.
-                    continue;
-                }
-                future::Either::Right((None, _)) => {
-                    // Early exit was signaled via `exit_read`.
-                    break Ok(());
-                }
-            };
+        let child_output = match future::select(process_read.next(), exit_read).await {
+            future::Either::Left((Some(child_output), e_r)) => {
+                exit_read = e_r;
+                child_output
+            }
+            future::Either::Left((None, _)) => {
+                // Process exited without sending an exit code... strange, but not fatal.
+                break Ok(());
+            }
+            future::Either::Right((_, _)) => {
+                // Early exit was signaled via `exit_read`.
+                break Ok(());
+            }
+        };
 
         // We have a valid child output to send.
         let exiting = match child_output {
@@ -180,71 +171,73 @@ async fn stdio_output<C: ClientSink>(
 /// Reads client inputs, including heartbeat (optionally validated) and stdin messages (optionally
 /// accepted).
 ///
-async fn client_input<C: ClientSink>(
+async fn input<C: ClientSink>(
     config: Config,
+    accept_stdin: bool,
     client_write: Arc<Mutex<C>>,
     mut client_read: impl Stream<Item = Result<InputChunk, io::Error>> + Unpin,
-    mut maybe_process_write: Option<mpsc::Sender<ChildInput>>,
-    exit_write: watch::Sender<()>,
+    mut process_write: mpsc::Sender<ChildInput>,
+    exit_write: oneshot::Sender<()>,
 ) -> Result<(), io::Error> {
     // If the process will accept stdin, send the StartReadingStdin chunk.
-    if maybe_process_write.is_some() {
+    if accept_stdin {
         let mut client_write = client_write.lock().await;
         client_write.send(OutputChunk::StartReadingStdin).await?;
     }
 
-    loop {
+    let res = loop {
         let input_chunk =
             match read_client_chunk(&mut client_read, config.heartbeat_frequency).await {
                 Some(Ok(input_chunk)) => input_chunk,
-                Some(Err(e)) => {
-                    // NB: This would happen anyway, but dropping the watch is what actually signals
-                    // exit, so we do it explicitly.
-                    std::mem::drop(exit_write);
-                    break Err(e);
-                }
-                None => {
-                    // Socket closed cleanly.
-                    break Ok(());
-                }
+                Some(Err(e)) => break Err(e),
+                None => break Ok(()),
             };
 
         // We have a valid chunk.
         match input_chunk {
             InputChunk::Stdin(bytes) => {
-                if let Some(ref mut process_write) = maybe_process_write {
-                    process_write
-                        .send(ChildInput::Stdin(bytes))
-                        .map_err(send_to_io)
-                        .await?;
-                    // If noisy_stdin is configured, we respond to every new chunk with `StartReadingStdin`.
-                    if config.noisy_stdin {
-                        let mut client_write = client_write.lock().await;
-                        client_write.send(OutputChunk::StartReadingStdin).await?;
-                    }
-                } else {
+                if !accept_stdin {
                     return Err(err(&format!("The StartReadingStdin chunk was not sent: did not expect to receive stdin.")));
+                }
+                process_write
+                    .send(ChildInput::Stdin(bytes))
+                    .map_err(send_to_io)
+                    .await?;
+                // If noisy_stdin is configured, we respond to every new chunk with `StartReadingStdin`.
+                if config.noisy_stdin {
+                    let mut client_write = client_write.lock().await;
+                    client_write.send(OutputChunk::StartReadingStdin).await?;
                 }
             }
             InputChunk::StdinEOF => {
-                if let Some(ref mut process_write) = maybe_process_write {
-                    process_write
-                        .send(ChildInput::StdinEOF)
-                        .map_err(send_to_io)
-                        .await?;
-                } else {
+                if !accept_stdin {
                     return Err(err(&format!("The StartReadingStdin chunk was not sent: did not expect to receive stdin.")));
                 }
+                process_write
+                    .send(ChildInput::StdinEOF)
+                    .map_err(send_to_io)
+                    .await?;
             }
             InputChunk::Heartbeat => {}
             c => {
+                // NB: This would happen automatically, but closing/dropping the process input is
+                // the explicit signal to the child that the client has disconnected. See
+                // `Nail::spawn` for more info.
+                std::mem::drop(process_write);
                 return Err(err(&format!(
                     "The client sent an unexpected chunk after initialization: {:?}",
                     c
-                )))
+                )));
             }
         }
-    }
+    };
+
+    // Signal the child process and the stdout handling task. These would be dropped here anyway,
+    // but exit_write is otherwise unused, so we're explicit.
+    std::mem::drop(process_write);
+    std::mem::drop(exit_write);
+
+    res
 }
 
 ///

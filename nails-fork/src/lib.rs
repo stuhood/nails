@@ -2,11 +2,11 @@ use std::io;
 use std::process::Stdio;
 
 use futures::channel::mpsc;
-use futures::{future, stream, FutureExt, SinkExt, StreamExt, TryStreamExt};
+use futures::{stream, FutureExt, SinkExt, StreamExt, TryStreamExt};
 use tokio::process::Command;
 
-use nails::execution::{self, send_to_io, sink_for, stream_for, ChildInput, ChildOutput, ExitCode};
-use nails::Nail;
+use nails::execution::{self, sink_for, stream_for, ChildInput, ChildOutput, ExitCode};
+use nails::{Child, Nail};
 
 /// A Nail implementation that forks processes.
 #[derive(Clone)]
@@ -16,34 +16,32 @@ impl Nail for ForkNail {
     fn spawn(
         &self,
         cmd: execution::Command,
-        output_sink: mpsc::Sender<ChildOutput>,
         input_stream: mpsc::Receiver<ChildInput>,
-    ) -> Result<bool, io::Error> {
+    ) -> Result<Child, io::Error> {
         let mut child = Command::new(cmd.command.clone())
             .args(cmd.args)
             .env_clear()
             .envs(cmd.env)
             .current_dir(cmd.working_dir)
+            .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
             .spawn()?;
 
-        let mut bounded_input_stream = input_stream
-            .take_while(|child_input| match child_input {
-                &ChildInput::Stdin(_) => future::ready(true),
-                &ChildInput::StdinEOF => future::ready(false),
-            })
-            .map(|child_input| match child_input {
-                ChildInput::Stdin(bytes) => Ok(bytes),
-                ChildInput::StdinEOF => unreachable!(),
-            });
-
         // Copy inputs to the child.
         let stdin = child.stdin.take().unwrap();
         tokio::spawn(async move {
+            let mut input_stream = input_stream.filter_map(|child_input| {
+                Box::pin(async move {
+                    match child_input {
+                        ChildInput::Stdin(bytes) => Some(Ok(bytes)),
+                        ChildInput::StdinEOF => None,
+                    }
+                })
+            });
             sink_for(stdin)
-                .send_all(&mut bounded_input_stream)
+                .send_all(&mut input_stream)
                 .map(|_| ())
                 .await;
         });
@@ -56,17 +54,20 @@ impl Nail for ForkNail {
         let exit_stream = child
             .into_stream()
             .map_ok(|exit_status| ChildOutput::Exit(ExitCode(exit_status.code().unwrap_or(-1))));
-        let mut output_stream = stream::select(stdout_stream, stderr_stream).chain(exit_stream);
+        let output_stream = stream::select(stdout_stream, stderr_stream)
+            .chain(exit_stream)
+            .map(|res| match res {
+                Ok(o) => o,
+                Err(e) => {
+                    log::warn!("IO error interacting with child process: {:?}", e);
+                    ChildOutput::Exit(ExitCode(-1))
+                }
+            })
+            .boxed();
 
-        // Spawn a task to send all of stdout/sterr/exit to our output sink.
-        tokio::spawn(async move {
-            output_sink
-                .sink_map_err(send_to_io)
-                .send_all(&mut output_stream)
-                .map(|_| ())
-                .await;
-        });
-
-        Ok(true)
+        Ok(Child {
+            output_stream,
+            accepts_stdin: true,
+        })
     }
 }

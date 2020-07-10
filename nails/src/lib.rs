@@ -4,6 +4,7 @@ pub mod execution;
 mod server_proto;
 
 use futures::channel::mpsc;
+use futures::stream::BoxStream;
 use std::io;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -42,15 +43,21 @@ impl Config {
 
 pub trait Nail: Clone + Send + Sync + 'static {
     ///
-    /// Spawns an instance of the nail, and returns true if the instance would like to receive
-    /// stdin. If stdin should not be accepted, the input_stream will close immediately.
+    /// Spawns an instance of the nail and returns a Child. Regardless of whether the child
+    /// indicates that stdin is accepted, the input_stream will remain open as long as the client
+    /// is alive (ie, has a healthy socket and is sending heartbeats). If the client disconnects
+    /// or times out the input_stream will be closed.
     ///
     fn spawn(
         &self,
         cmd: Command,
-        output_sink: mpsc::Sender<ChildOutput>,
         input_stream: mpsc::Receiver<ChildInput>,
-    ) -> Result<bool, io::Error>;
+    ) -> Result<Child, io::Error>;
+}
+
+pub struct Child {
+    pub output_stream: BoxStream<'static, ChildOutput>,
+    pub accepts_stdin: bool,
 }
 
 pub async fn server_handle_connection(
@@ -78,7 +85,7 @@ pub async fn client_handle_connection(
 
 #[cfg(test)]
 mod tests {
-    use super::{client_handle_connection, server_handle_connection, Config, Nail};
+    use super::{client_handle_connection, server_handle_connection, Child, Config, Nail};
 
     use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
 
@@ -86,10 +93,9 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use log::error;
-
     use bytes::Bytes;
     use futures::channel::mpsc;
+    use futures::stream;
     use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::time::delay_for;
@@ -246,23 +252,18 @@ mod tests {
     struct ConstantNail(Option<Duration>, ExitCode);
 
     impl Nail for ConstantNail {
-        fn spawn(
-            &self,
-            _: Command,
-            mut output_sink: mpsc::Sender<ChildOutput>,
-            _: mpsc::Receiver<ChildInput>,
-        ) -> Result<bool, io::Error> {
+        fn spawn(&self, _: Command, _: mpsc::Receiver<ChildInput>) -> Result<Child, io::Error> {
             let nail = self.clone();
-            tokio::spawn(async move {
+            let output = async move {
                 if let Some(delay_duration) = nail.0 {
                     delay_for(delay_duration).await;
                 }
-                output_sink
-                    .send(ChildOutput::Exit(nail.1))
-                    .map(|_| ())
-                    .await;
-            });
-            Ok(false)
+                ChildOutput::Exit(nail.1)
+            };
+            Ok(Child {
+                output_stream: output.into_stream().boxed(),
+                accepts_stdin: false,
+            })
         }
     }
 
@@ -273,11 +274,10 @@ mod tests {
         fn spawn(
             &self,
             _: Command,
-            mut output_sink: mpsc::Sender<ChildOutput>,
             mut input_stream: mpsc::Receiver<ChildInput>,
-        ) -> Result<bool, io::Error> {
-            tokio::spawn(async move {
-                error!("Server spawned thread!");
+        ) -> Result<Child, io::Error> {
+            let output = async move {
+                log::info!("Server spawned thread!");
                 let input_bytes = match input_stream.next().await {
                     Some(ChildInput::Stdin(bytes)) => bytes,
                     x => panic!("Unexpected input: {:?}", x),
@@ -286,16 +286,15 @@ mod tests {
                     Some(ChildInput::StdinEOF) => (),
                     x => panic!("Unexpected input: {:?}", x),
                 };
-                output_sink
-                    .send(ChildOutput::Stdout(input_bytes))
-                    .await
-                    .unwrap();
-                output_sink
-                    .send(ChildOutput::Exit(ExitCode(0)))
-                    .await
-                    .unwrap();
-            });
-            Ok(true)
+                stream::iter(vec![
+                    ChildOutput::Stdout(input_bytes),
+                    ChildOutput::Exit(ExitCode(0)),
+                ])
+            };
+            Ok(Child {
+                output_stream: output.into_stream().flatten().boxed(),
+                accepts_stdin: true,
+            })
         }
     }
 }

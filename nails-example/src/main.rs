@@ -1,4 +1,4 @@
-use nails;
+use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::net::TcpListener;
@@ -7,7 +7,9 @@ use nails_fork::ForkNail;
 
 #[tokio::main]
 async fn main() {
-    let config = nails::Config::default();
+    env_logger::init();
+
+    let config = nails::Config::default().heartbeat_frequency(Duration::from_millis(500));
     let nail = ForkNail;
 
     let mut listener = TcpListener::bind("127.0.0.1:2113").await.unwrap();
