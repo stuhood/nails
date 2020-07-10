@@ -1,6 +1,6 @@
 [package]
 name = "nails-client"
-version = "0.5.2"
+version = "0.6.0"
 authors = ["Stu Hood <stuhood@gmail.com>"]
 license = "Apache-2.0"
 readme = "../README.md"
@@ -15,5 +15,5 @@ edition = "2018"
 env_logger = "0.5"
 futures = "0.3"
 log = "0.4"
-nails = { path = "../nails", version = "=0.5.2" }
+nails = { path = "../nails", version = "=0.6.0" }
 tokio = { version = "0.2", features = ["io-std", "io-util", "macros", "rt-threaded", "tcp"] }
