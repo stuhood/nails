@@ -3,10 +3,12 @@ mod codec;
 pub mod execution;
 mod server_proto;
 
-use futures::channel::mpsc;
-use futures::stream::BoxStream;
+use std::future::Future;
 use std::io;
 use std::time::Duration;
+
+use futures::channel::mpsc;
+use futures::stream::BoxStream;
 use tokio::net::TcpStream;
 
 use crate::execution::{ChildInput, ChildOutput, Command, ExitCode};
@@ -60,6 +62,9 @@ pub struct Child {
     pub accepts_stdin: bool,
 }
 
+///
+/// Implements the server side of a single connection on the given socket.
+///
 pub async fn server_handle_connection(
     config: Config,
     nail: impl Nail,
@@ -71,16 +76,22 @@ pub async fn server_handle_connection(
     Ok(())
 }
 
+///
+/// Implements the client side of a single connection on the given socket.
+///
+/// The `input_stream` is lazily instantiated because servers only optionally accept input, and
+/// clients should not begin reading stdin from their callers unless the server will accept it.
+///
 pub async fn client_handle_connection(
     config: Config,
     socket: TcpStream,
     cmd: Command,
     output_sink: mpsc::Sender<ChildOutput>,
-    input_stream: mpsc::Receiver<ChildInput>,
+    open_input_stream: impl Future<Output = mpsc::Receiver<ChildInput>>,
 ) -> Result<ExitCode, io::Error> {
     socket.set_nodelay(true)?;
     let (read, write) = socket.into_split();
-    client_proto::execute(config, read, write, cmd, output_sink, input_stream).await
+    client_proto::execute(config, read, write, cmd, output_sink, open_input_stream).await
 }
 
 #[cfg(test)]
@@ -134,23 +145,25 @@ mod tests {
             env: vec![],
             working_dir: PathBuf::from("/dev/null"),
         };
-        let (mut stdin_write, stdin_read) = child_channel::<ChildInput>();
         let (stdio_write, mut stdio_read) = child_channel::<ChildOutput>();
 
         // This channel has some buffer which we add to before actually launching the client.
         let expected_bytes = Bytes::from("some bytes");
-        stdin_write
-            .send(ChildInput::Stdin(expected_bytes.clone()))
-            .await
-            .unwrap();
-        stdin_write.send(ChildInput::StdinEOF).await.unwrap();
-        let exit_code = TcpStream::connect(&addr)
-            .and_then(move |stream| {
-                client_handle_connection(Config::default(), stream, cmd, stdio_write, stdin_read)
+        let exit_code = {
+            let expected_bytes = expected_bytes.clone();
+            let stream = TcpStream::connect(&addr).await.unwrap();
+            client_handle_connection(Config::default(), stream, cmd, stdio_write, async {
+                let (mut stdin_write, stdin_read) = child_channel::<ChildInput>();
+                stdin_write
+                    .send(ChildInput::Stdin(expected_bytes))
+                    .await
+                    .unwrap();
+                stdin_write.send(ChildInput::StdinEOF).await.unwrap();
+                stdin_read
             })
-            .map_err(|e| format!("Error communicating with server: {}", e))
             .await
-            .unwrap();
+            .unwrap()
+        };
 
         assert_eq!(
             ChildOutput::Stdout(expected_bytes),
@@ -235,11 +248,13 @@ mod tests {
         addr: std::net::SocketAddr,
         command: Command,
     ) -> Result<ExitCode, String> {
-        let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
         let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
         TcpStream::connect(&addr)
             .and_then(move |stream| {
-                client_handle_connection(config, stream, command, stdio_write, stdin_read)
+                client_handle_connection(config, stream, command, stdio_write, async {
+                    let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
+                    stdin_read
+                })
             })
             .map_err(|e| format!("Error communicating with server: {}", e))
             .await

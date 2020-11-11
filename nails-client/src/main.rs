@@ -96,18 +96,20 @@ async fn main() -> Result<(), String> {
 
     // Spawn tasks to read stdout/stderr and write stdin.
     let (stdio_write, stdio_read) = child_channel::<ChildOutput>();
-    let (stdin_write, stdin_read) = child_channel::<ChildInput>();
     let stdio_printer = tokio::spawn(handle_stdio(stdio_read));
-    let _join = tokio::spawn(handle_stdin(stdin_write));
 
     // And handle the connection in the foreground.
     debug!("Connecting to server at {}...", addr);
-    let exit_code = TcpStream::connect(&addr)
-        .and_then(|stream| {
-            nails::client_handle_connection(config, stream, cmd, stdio_write, stdin_read)
-        })
-        .map_err(|e| format!("Error communicating with server: {}", e))
-        .await?;
+    let stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| format!("Error connecting to server: {}", e))?;
+    let exit_code = nails::client_handle_connection(config, stream, cmd, stdio_write, async {
+        let (stdin_write, stdin_read) = child_channel::<ChildInput>();
+        let _join = tokio::spawn(handle_stdin(stdin_write));
+        stdin_read
+    })
+    .map_err(|e| format!("Error communicating with server: {}", e))
+    .await?;
 
     stdio_printer
         .await

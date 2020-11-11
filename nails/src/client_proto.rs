@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::future::Future;
 use std::io;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -43,7 +44,7 @@ pub async fn execute<R, W>(
     write: W,
     cmd: Command,
     cli_write: mpsc::Sender<ChildOutput>,
-    cli_read: mpsc::Receiver<ChildInput>,
+    open_cli_read: impl Future<Output = mpsc::Receiver<ChildInput>>,
 ) -> Result<ExitCode, io::Error>
 where
     R: AsyncRead + Debug + Unpin + Send + 'static,
@@ -75,7 +76,8 @@ where
     }
 
     // Then handle stdio until we receive an ExitCode.
-    let exit_code_res = handle_stdio(server_read, server_write.clone(), cli_write, cli_read).await;
+    let exit_code_res =
+        handle_stdio(server_read, server_write.clone(), cli_write, open_cli_read).await;
     // TODO: Closing the write half of the `into_split` socket seemingly closes the entire socket,
     // so we hold onto it here until the rest of the protocol has completed.
     std::mem::drop(server_write);
@@ -86,9 +88,9 @@ async fn handle_stdio<S: ServerSink>(
     mut server_read: impl Stream<Item = Result<OutputChunk, io::Error>> + Unpin,
     server_write: Arc<Mutex<S>>,
     mut cli_write: mpsc::Sender<ChildOutput>,
-    cli_read: mpsc::Receiver<ChildInput>,
+    open_cli_read: impl Future<Output = mpsc::Receiver<ChildInput>>,
 ) -> Result<ExitCode, io::Error> {
-    let mut stdin_inputs = Some((server_write, cli_read));
+    let mut stdin_inputs = Some((server_write, open_cli_read));
     while let Some(output_chunk) = server_read.next().await {
         match output_chunk? {
             OutputChunk::Stderr(bytes) => {
@@ -109,9 +111,9 @@ async fn handle_stdio<S: ServerSink>(
                 // We spawn a task to send stdin after receiving `StartReadingStdin`, but only
                 // once: some servers (ours included, optionally) have a `noisy_stdin` behaviour
                 // where they ask for more input after every Stdin chunk.
-                if let Some((server_write, cli_read)) = stdin_inputs.take() {
+                if let Some((server_write, open_cli_read)) = stdin_inputs.take() {
                     debug!("nails client will start sending stdin.");
-                    let _join = tokio::spawn(stdin_sender(server_write, cli_read));
+                    let _join = tokio::spawn(stdin_sender(server_write, open_cli_read.await));
                 }
             }
             OutputChunk::Exit(code) => {
