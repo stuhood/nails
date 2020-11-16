@@ -17,7 +17,7 @@ async fn main() {
 
     while let Some(socket) = listener.incoming().next().await {
         println!("Got connection: {:?}", socket);
-        tokio::spawn(nails::server_handle_connection(
+        tokio::spawn(nails::server::handle_connection(
             config.clone(),
             nail.clone(),
             socket.unwrap(),

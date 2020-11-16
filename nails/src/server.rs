@@ -8,6 +8,7 @@ use futures::channel::mpsc;
 use futures::stream::BoxStream;
 use futures::{future, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::timeout;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -16,15 +17,29 @@ use crate::codec::{InputChunk, OutputChunk, ServerCodec};
 use crate::execution::{child_channel, send_to_io, Args, ChildInput, ChildOutput, Command, Env};
 use crate::{Config, Nail};
 
+pub struct Child {
+    pub output_stream: BoxStream<'static, ChildOutput>,
+    pub accepts_stdin: bool,
+}
+
+///
+/// Implements the server side of a single connection on the given socket.
+///
+pub async fn handle_connection(
+    config: Config,
+    nail: impl Nail,
+    socket: TcpStream,
+) -> Result<(), io::Error> {
+    socket.set_nodelay(true)?;
+    let (read, write) = socket.into_split();
+    execute(config, nail, read, write).await?;
+    Ok(())
+}
+
 ///
 /// Executes the nailgun protocol. Returns success for everything except socket errors.
 ///
-pub async fn execute<R, W>(
-    config: Config,
-    nail: impl Nail,
-    read: R,
-    write: W,
-) -> Result<(), io::Error>
+async fn execute<R, W>(config: Config, nail: impl Nail, read: R, write: W) -> Result<(), io::Error>
 where
     R: AsyncRead + Debug + Unpin + Send + 'static,
     W: AsyncWrite + Debug + Unpin + Send + 'static,

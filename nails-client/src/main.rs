@@ -103,7 +103,7 @@ async fn main() -> Result<(), String> {
     let stream = TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("Error connecting to server: {}", e))?;
-    let exit_code = nails::client_handle_connection(config, stream, cmd, stdio_write, async {
+    let exit_code = nails::client::handle_connection(config, stream, cmd, stdio_write, async {
         let (stdin_write, stdin_read) = child_channel::<ChildInput>();
         let _join = tokio::spawn(handle_stdin(stdin_write));
         stdin_read

@@ -1,17 +1,14 @@
-mod client_proto;
+pub mod client;
 mod codec;
 pub mod execution;
-mod server_proto;
+pub mod server;
 
-use std::future::Future;
 use std::io;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use futures::stream::BoxStream;
-use tokio::net::TcpStream;
 
-use crate::execution::{ChildInput, ChildOutput, Command, ExitCode};
+use crate::execution::{ChildInput, Command};
 
 #[derive(Default, Clone)]
 pub struct Config {
@@ -54,50 +51,12 @@ pub trait Nail: Clone + Send + Sync + 'static {
         &self,
         cmd: Command,
         input_stream: mpsc::Receiver<ChildInput>,
-    ) -> Result<Child, io::Error>;
-}
-
-pub struct Child {
-    pub output_stream: BoxStream<'static, ChildOutput>,
-    pub accepts_stdin: bool,
-}
-
-///
-/// Implements the server side of a single connection on the given socket.
-///
-pub async fn server_handle_connection(
-    config: Config,
-    nail: impl Nail,
-    socket: TcpStream,
-) -> Result<(), io::Error> {
-    socket.set_nodelay(true)?;
-    let (read, write) = socket.into_split();
-    server_proto::execute(config, nail, read, write).await?;
-    Ok(())
-}
-
-///
-/// Implements the client side of a single connection on the given socket.
-///
-/// The `input_stream` is lazily instantiated because servers only optionally accept input, and
-/// clients should not begin reading stdin from their callers unless the server will accept it.
-///
-pub async fn client_handle_connection(
-    config: Config,
-    socket: TcpStream,
-    cmd: Command,
-    output_sink: mpsc::Sender<ChildOutput>,
-    open_input_stream: impl Future<Output = mpsc::Receiver<ChildInput>>,
-) -> Result<ExitCode, io::Error> {
-    socket.set_nodelay(true)?;
-    let (read, write) = socket.into_split();
-    client_proto::execute(config, read, write, cmd, output_sink, open_input_stream).await
+    ) -> Result<server::Child, io::Error>;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{client_handle_connection, server_handle_connection, Child, Config, Nail};
-
+    use super::{client, server, Config, Nail};
     use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
 
     use std::io;
@@ -152,7 +111,7 @@ mod tests {
         let exit_code = {
             let expected_bytes = expected_bytes.clone();
             let stream = TcpStream::connect(&addr).await.unwrap();
-            client_handle_connection(Config::default(), stream, cmd, stdio_write, async {
+            client::handle_connection(Config::default(), stream, cmd, stdio_write, async {
                 let (mut stdin_write, stdin_read) = child_channel::<ChildInput>();
                 stdin_write
                     .send(ChildInput::Stdin(expected_bytes))
@@ -234,7 +193,7 @@ mod tests {
         tokio::spawn(async move {
             let socket = listener.incoming().next().await.unwrap().unwrap();
             println!("Got connection: {:?}", socket);
-            tokio::spawn(server_handle_connection(config.clone(), nail, socket))
+            tokio::spawn(server::handle_connection(config.clone(), nail, socket))
         });
 
         addr
@@ -251,7 +210,7 @@ mod tests {
         let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
         TcpStream::connect(&addr)
             .and_then(move |stream| {
-                client_handle_connection(config, stream, command, stdio_write, async {
+                client::handle_connection(config, stream, command, stdio_write, async {
                     let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
                     stdin_read
                 })
@@ -267,7 +226,11 @@ mod tests {
     struct ConstantNail(Option<Duration>, ExitCode);
 
     impl Nail for ConstantNail {
-        fn spawn(&self, _: Command, _: mpsc::Receiver<ChildInput>) -> Result<Child, io::Error> {
+        fn spawn(
+            &self,
+            _: Command,
+            _: mpsc::Receiver<ChildInput>,
+        ) -> Result<server::Child, io::Error> {
             let nail = self.clone();
             let output = async move {
                 if let Some(delay_duration) = nail.0 {
@@ -275,7 +238,7 @@ mod tests {
                 }
                 ChildOutput::Exit(nail.1)
             };
-            Ok(Child {
+            Ok(server::Child {
                 output_stream: output.into_stream().boxed(),
                 accepts_stdin: false,
             })
@@ -290,7 +253,7 @@ mod tests {
             &self,
             _: Command,
             mut input_stream: mpsc::Receiver<ChildInput>,
-        ) -> Result<Child, io::Error> {
+        ) -> Result<server::Child, io::Error> {
             let output = async move {
                 log::info!("Server spawned thread!");
                 let input_bytes = match input_stream.next().await {
@@ -306,7 +269,7 @@ mod tests {
                     ChildOutput::Exit(ExitCode(0)),
                 ])
             };
-            Ok(Child {
+            Ok(server::Child {
                 output_stream: output.into_stream().flatten().boxed(),
                 accepts_stdin: true,
             })

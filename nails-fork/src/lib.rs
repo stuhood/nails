@@ -6,7 +6,7 @@ use futures::{stream, FutureExt, SinkExt, StreamExt, TryStreamExt};
 use tokio::process::Command;
 
 use nails::execution::{self, sink_for, stream_for, ChildInput, ChildOutput, ExitCode};
-use nails::{Child, Nail};
+use nails::{server, Nail};
 
 /// A Nail implementation that forks processes.
 #[derive(Clone)]
@@ -17,7 +17,7 @@ impl Nail for ForkNail {
         &self,
         cmd: execution::Command,
         input_stream: mpsc::Receiver<ChildInput>,
-    ) -> Result<Child, io::Error> {
+    ) -> Result<server::Child, io::Error> {
         let mut child = Command::new(cmd.command.clone())
             .args(cmd.args)
             .env_clear()
@@ -65,7 +65,7 @@ impl Nail for ForkNail {
             })
             .boxed();
 
-        Ok(Child {
+        Ok(server::Child {
             output_stream,
             accepts_stdin: true,
         })

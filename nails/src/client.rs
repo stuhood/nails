@@ -8,6 +8,7 @@ use futures::channel::mpsc;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use log::{debug, trace};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::delay_for;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -15,6 +16,24 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
 use crate::execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
 use crate::Config;
+
+///
+/// Implements the client side of a single connection on the given socket.
+///
+/// The `input_stream` is lazily instantiated because servers only optionally accept input, and
+/// clients should not begin reading stdin from their callers unless the server will accept it.
+///
+pub async fn handle_connection(
+    config: Config,
+    socket: TcpStream,
+    cmd: Command,
+    output_sink: mpsc::Sender<ChildOutput>,
+    open_input_stream: impl Future<Output = mpsc::Receiver<ChildInput>>,
+) -> Result<ExitCode, io::Error> {
+    socket.set_nodelay(true)?;
+    let (read, write) = socket.into_split();
+    execute(config, read, write, cmd, output_sink, open_input_stream).await
+}
 
 ///
 /// Converts a Command into the initialize chunks for the nailgun protocol. Note: order matters.
@@ -38,7 +57,7 @@ fn command_as_chunks(cmd: Command) -> Vec<InputChunk> {
     chunks
 }
 
-pub async fn execute<R, W>(
+async fn execute<R, W>(
     config: Config,
     read: R,
     write: W,
