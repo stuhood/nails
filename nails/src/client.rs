@@ -5,7 +5,9 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use futures::future::{AbortHandle, Abortable, Aborted, BoxFuture};
+use futures::stream::BoxStream;
+use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use log::{debug, trace};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -14,8 +16,61 @@ use tokio::time::delay_for;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
-use crate::execution::{send_to_io, ChildInput, ChildOutput, Command, ExitCode};
+use crate::execution::{child_channel, send_to_io, ChildInput, ChildOutput, Command, ExitCode};
 use crate::Config;
+
+pub struct Child {
+    ///
+    /// A stream of outputs from the remote child process.
+    ///
+    /// Similar to `std::process::Child`, you should `take` this instance to avoid partial moves:
+    ///   let output_stream = child.output_stream.take().unwrap();
+    ///
+    pub output_stream: Option<BoxStream<'static, ChildOutput>>,
+    ///
+    /// A future for the exit code of the remote process.
+    ///
+    exit_code: Option<BoxFuture<'static, Result<ExitCode, io::Error>>>,
+    ///
+    /// A callable to shut down the write half of the connection upon request.
+    ///
+    shutdown_fut: Option<BoxFuture<'static, ()>>,
+    ///
+    /// A handle to cancel the background task managing the connection when the Child is dropped.
+    ///
+    abort_handle: AbortHandle,
+}
+
+impl Child {
+    ///
+    /// Closes the write half of the connection to the server, which will trigger cancellation in
+    /// well behaved servers. Because the read half of the connection will still be open, a well
+    /// behaved server/Nail will render teardown information before exiting.
+    ///
+    /// Dropping the Child instance also triggers cancellation, but closes both the read and write
+    /// halves of the connection at the same time (which does not allow for orderly shutdown of
+    /// the server).
+    ///
+    pub async fn shutdown(&mut self) {
+        if let Some(shutdown_fut) = self.shutdown_fut.take() {
+            shutdown_fut.await;
+        }
+    }
+
+    ///
+    /// Wait for the Child to have exited, and return an ExitCode.
+    ///
+    pub async fn wait(mut self) -> Result<ExitCode, io::Error> {
+        // This method may only be called once, so it's safe to take the exit code unconditionally.
+        self.exit_code.take().unwrap().await
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        self.abort_handle.abort();
+    }
+}
 
 ///
 /// Implements the client side of a single connection on the given socket.
@@ -27,12 +82,11 @@ pub async fn handle_connection(
     config: Config,
     socket: TcpStream,
     cmd: Command,
-    output_sink: mpsc::Sender<ChildOutput>,
-    open_input_stream: impl Future<Output = mpsc::Receiver<ChildInput>>,
-) -> Result<ExitCode, io::Error> {
+    open_input_stream: impl Future<Output = mpsc::Receiver<ChildInput>> + Send + 'static,
+) -> Result<Child, io::Error> {
     socket.set_nodelay(true)?;
     let (read, write) = socket.into_split();
-    execute(config, read, write, cmd, output_sink, open_input_stream).await
+    execute(config, read, write, cmd, open_input_stream).await
 }
 
 ///
@@ -62,9 +116,8 @@ async fn execute<R, W>(
     read: R,
     write: W,
     cmd: Command,
-    cli_write: mpsc::Sender<ChildOutput>,
-    open_cli_read: impl Future<Output = mpsc::Receiver<ChildInput>>,
-) -> Result<ExitCode, io::Error>
+    open_cli_read: impl Future<Output = mpsc::Receiver<ChildInput>> + Send + 'static,
+) -> Result<Child, io::Error>
 where
     R: AsyncRead + Debug + Unpin + Send + 'static,
     W: AsyncWrite + Debug + Unpin + Send + 'static,
@@ -84,9 +137,18 @@ where
             ))
         })
         .await?;
+    let server_write = Arc::new(Mutex::new(Some(server_write)));
+
+    // Calls to shutdown will drop the write half of the socket.
+    let shutdown_fut = {
+        let server_write = server_write.clone();
+        async move {
+            // Take and drop the write half of the connection (if it has not already been dropped).
+            let _ = server_write.lock().await.take();
+        }
+    };
 
     // If configured, spawn a task to send heartbeats.
-    let server_write = Arc::new(Mutex::new(server_write));
     if let Some(heartbeat_frequency) = config.heartbeat_frequency {
         let _join = tokio::spawn(heartbeat_sender(
             Arc::downgrade(&server_write),
@@ -94,18 +156,40 @@ where
         ));
     }
 
-    // Then handle stdio until we receive an ExitCode.
-    let exit_code_res =
-        handle_stdio(server_read, server_write.clone(), cli_write, open_cli_read).await;
-    // TODO: Closing the write half of the `into_split` socket seemingly closes the entire socket,
-    // so we hold onto it here until the rest of the protocol has completed.
-    std::mem::drop(server_write);
-    exit_code_res
+    // Then handle stdio until we receive an ExitCode, or until the Child is dropped.
+    let (cli_write, cli_read) = child_channel::<ChildOutput>();
+    let (abort_handle, exit_code) = {
+        // We spawn the execution of the process onto a background task to ensure that it starts
+        // running even if a consumer of the Child instance chooses to completely consume the stdio
+        // output_stream before interacting with the exit code (rathering than `join`ing them).
+        //
+        // We wrap in Abortable so that dropping the Child instance cancels the background task.
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let stdio_task = handle_stdio(server_read, server_write.clone(), cli_write, open_cli_read);
+        let exit_code_result = tokio::spawn(Abortable::new(stdio_task, abort_registration));
+        let exit_code = async move {
+            match exit_code_result.await.unwrap() {
+                Ok(res) => res,
+                Err(Aborted) => Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "The connection was canceled because the Child was dropped",
+                )),
+            }
+        }
+        .boxed();
+        (abort_handle, exit_code)
+    };
+    Ok(Child {
+        output_stream: Some(cli_read.boxed()),
+        exit_code: Some(exit_code),
+        shutdown_fut: Some(shutdown_fut.boxed()),
+        abort_handle,
+    })
 }
 
 async fn handle_stdio<S: ServerSink>(
     mut server_read: impl Stream<Item = Result<OutputChunk, io::Error>> + Unpin,
-    server_write: Arc<Mutex<S>>,
+    server_write: Arc<Mutex<Option<S>>>,
     mut cli_write: mpsc::Sender<ChildOutput>,
     open_cli_read: impl Future<Output = mpsc::Receiver<ChildInput>>,
 ) -> Result<ExitCode, io::Error> {
@@ -152,19 +236,22 @@ async fn handle_stdio<S: ServerSink>(
 }
 
 async fn stdin_sender<S: ServerSink>(
-    server_write: Arc<Mutex<S>>,
+    server_write: Arc<Mutex<Option<S>>>,
     mut cli_read: mpsc::Receiver<ChildInput>,
 ) -> Result<(), io::Error> {
     while let Some(input_chunk) = cli_read.next().await {
+        let mut server_write_guard = server_write.lock().await;
+        let server_write = if let Some(ref mut server_write) = *server_write_guard {
+            server_write
+        } else {
+            break;
+        };
         match input_chunk {
             ChildInput::Stdin(bytes) => {
                 trace!("nails client sending {} bytes of stdin.", bytes.len());
-                let mut server_write = server_write.lock().await;
                 server_write.send(InputChunk::Stdin(bytes)).await?;
             }
             ChildInput::StdinEOF => {
-                trace!("nails client closing stdin.");
-                let mut server_write = server_write.lock().await;
                 server_write.send(InputChunk::StdinEOF).await?;
                 break;
             }
@@ -174,7 +261,7 @@ async fn stdin_sender<S: ServerSink>(
 }
 
 async fn heartbeat_sender<S: ServerSink>(
-    server_write: Weak<Mutex<S>>,
+    server_write: Weak<Mutex<Option<S>>>,
     heartbeat_frequency: Duration,
 ) -> Result<(), io::Error> {
     loop {
@@ -185,7 +272,11 @@ async fn heartbeat_sender<S: ServerSink>(
         // Then, if the connection might still be alive...
         if let Some(server_write) = server_write.upgrade() {
             let mut server_write = server_write.lock().await;
-            server_write.send(InputChunk::Heartbeat).await?;
+            if let Some(ref mut server_write) = *server_write {
+                server_write.send(InputChunk::Heartbeat).await?;
+            } else {
+                break Ok(());
+            }
         } else {
             break Ok(());
         };

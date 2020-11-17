@@ -59,21 +59,22 @@ mod tests {
     use super::{client, server, Config, Nail};
     use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
 
+    use std::future::Future;
     use std::io;
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use bytes::Bytes;
     use futures::channel::mpsc;
     use futures::stream;
-    use futures::{FutureExt, SinkExt, StreamExt, TryFutureExt};
+    use futures::{FutureExt, SinkExt, StreamExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::time::delay_for;
 
     #[tokio::test]
     async fn roundtrip_noop() {
         let expected_exit_code = ExitCode(67);
-        let addr =
+        let (addr, _) =
             one_connection_server(Config::default(), ConstantNail(None, expected_exit_code)).await;
 
         // This Nail will ignore the content of the command, so we're only validating the exit code.
@@ -95,7 +96,7 @@ mod tests {
 
     #[tokio::test]
     async fn roundtrip_echo() {
-        let addr = one_connection_server(Config::default(), StdoutEchoNail).await;
+        let (addr, _) = one_connection_server(Config::default(), StdoutEchoNail).await;
 
         // This Nail ignores the command and echos one blob of stdin.
         let cmd = Command {
@@ -104,14 +105,13 @@ mod tests {
             env: vec![],
             working_dir: PathBuf::from("/dev/null"),
         };
-        let (stdio_write, mut stdio_read) = child_channel::<ChildOutput>();
 
         // This channel has some buffer which we add to before actually launching the client.
         let expected_bytes = Bytes::from("some bytes");
-        let exit_code = {
+        let mut child = {
             let expected_bytes = expected_bytes.clone();
             let stream = TcpStream::connect(&addr).await.unwrap();
-            client::handle_connection(Config::default(), stream, cmd, stdio_write, async {
+            client::handle_connection(Config::default(), stream, cmd, async {
                 let (mut stdin_write, stdin_read) = child_channel::<ChildInput>();
                 stdin_write
                     .send(ChildInput::Stdin(expected_bytes))
@@ -126,9 +126,51 @@ mod tests {
 
         assert_eq!(
             ChildOutput::Stdout(expected_bytes),
-            stdio_read.next().await.unwrap()
+            child.output_stream.take().unwrap().next().await.unwrap()
         );
-        assert_eq!(ExitCode(0), exit_code);
+        assert_eq!(ExitCode(0), child.wait().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn roundtrip_cancellation() {
+        // Spawn on a nail that will wait a long time before returning, and then cancel
+        // the run, and confirm that the client and server half of the connection both exit before
+        // the full wait.
+        let full_wait = Duration::from_secs(30);
+        let deadline = Instant::now() + full_wait;
+        let expected_exit_code = ExitCode(123);
+        let (addr, server) = one_connection_server(
+            Config::default(),
+            ConstantNail(Some(full_wait), expected_exit_code),
+        )
+        .await;
+        let cmd = Command {
+            command: "nothing".to_owned(),
+            args: vec![],
+            env: vec![],
+            working_dir: PathBuf::from("/dev/null"),
+        };
+
+        // Launch the client.
+        let mut child = {
+            let stream = TcpStream::connect(&addr).await.unwrap();
+            client::handle_connection(Config::default(), stream, cmd, async {
+                let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
+                stdin_read
+            })
+            .await
+            .unwrap()
+        };
+
+        // Cancel the client, and confirm that we get a particular ExitCode.
+        child.shutdown().await;
+        assert_eq!(ExitCode(-2), child.wait().await.unwrap());
+
+        // And that that server exits as well.
+        server.await;
+
+        // ... all before the deadline.
+        assert!(Instant::now() < deadline);
     }
 
     #[tokio::test]
@@ -160,7 +202,7 @@ mod tests {
         // heartbeats are required to succeed.
         let nail_delay = server_config.heartbeat_frequency.map(|f| f * 4);
         let success_exit_code = ExitCode(67);
-        let addr =
+        let (addr, _) =
             one_connection_server(server_config, ConstantNail(nail_delay, success_exit_code)).await;
 
         let exit_code = send_with_no_stdio(
@@ -179,24 +221,28 @@ mod tests {
         if expect_success {
             assert_eq!(success_exit_code, exit_code);
         } else {
-            assert_eq!(ExitCode(1), exit_code);
+            assert_eq!(ExitCode(-2), exit_code);
         }
     }
 
     ///
     /// A server that is spawned into the background, accepts one connection and then exits.
     ///
-    async fn one_connection_server(config: Config, nail: impl Nail) -> std::net::SocketAddr {
+    async fn one_connection_server(
+        config: Config,
+        nail: impl Nail,
+    ) -> (std::net::SocketAddr, impl Future<Output = ()>) {
         let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             let socket = listener.incoming().next().await.unwrap().unwrap();
             println!("Got connection: {:?}", socket);
-            tokio::spawn(server::handle_connection(config.clone(), nail, socket))
-        });
+            server::handle_connection(config.clone(), nail, socket).await
+        })
+        .map(|_| ());
 
-        addr
+        (addr, server)
     }
 
     ///
@@ -207,16 +253,19 @@ mod tests {
         addr: std::net::SocketAddr,
         command: Command,
     ) -> Result<ExitCode, String> {
-        let (stdio_write, _stdio_read) = child_channel::<ChildOutput>();
-        TcpStream::connect(&addr)
-            .and_then(move |stream| {
-                client::handle_connection(config, stream, command, stdio_write, async {
-                    let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
-                    stdin_read
-                })
-            })
-            .map_err(|e| format!("Error communicating with server: {}", e))
+        let stream = TcpStream::connect(&addr)
             .await
+            .map_err(|e| format!("Error connecting to server: {}", e))?;
+        let child = client::handle_connection(config, stream, command, async {
+            let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
+            stdin_read
+        })
+        .await
+        .map_err(|e| format!("Error launching process: {}", e))?;
+        child
+            .wait()
+            .await
+            .map_err(|e| format!("Process exited abnormally: {}", e))
     }
 
     ///
@@ -229,14 +278,25 @@ mod tests {
         fn spawn(
             &self,
             _: Command,
-            _: mpsc::Receiver<ChildInput>,
+            input_stream: mpsc::Receiver<ChildInput>,
         ) -> Result<server::Child, io::Error> {
             let nail = self.clone();
             let output = async move {
                 if let Some(delay_duration) = nail.0 {
-                    delay_for(delay_duration).await;
+                    tokio::select! {
+                      _ = delay_for(delay_duration) => {
+                          // We delayed and then exited successfully.
+                          ChildOutput::Exit(nail.1)
+                      }
+                      _ = input_stream.fold((), |(), _| async {}) => {
+                          // We were cancelled: exit immediately unsuccessfully.
+                          ChildOutput::Exit(ExitCode(-2))
+                      }
+                    }
+                } else {
+                    // No delay: exit immediately without handling cancellation.
+                    ChildOutput::Exit(nail.1)
                 }
-                ChildOutput::Exit(nail.1)
             };
             Ok(server::Child {
                 output_stream: output.into_stream().boxed(),

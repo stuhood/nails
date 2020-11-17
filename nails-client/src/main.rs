@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use futures::{SinkExt, Stream, StreamExt, TryFutureExt};
+use futures::{future, SinkExt, Stream, StreamExt, TryFutureExt};
 use log::debug;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -94,27 +94,26 @@ async fn main() -> Result<(), String> {
     // should be different in order to be maximally lenient.
     let config = nails::Config::default().heartbeat_frequency(Duration::from_millis(500));
 
-    // Spawn tasks to read stdout/stderr and write stdin.
-    let (stdio_write, stdio_read) = child_channel::<ChildOutput>();
-    let stdio_printer = tokio::spawn(handle_stdio(stdio_read));
-
     // And handle the connection in the foreground.
     debug!("Connecting to server at {}...", addr);
     let stream = TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("Error connecting to server: {}", e))?;
-    let exit_code = nails::client::handle_connection(config, stream, cmd, stdio_write, async {
+    let mut child = nails::client::handle_connection(config, stream, cmd, async {
         let (stdin_write, stdin_read) = child_channel::<ChildInput>();
         let _join = tokio::spawn(handle_stdin(stdin_write));
         stdin_read
     })
-    .map_err(|e| format!("Error communicating with server: {}", e))
+    .map_err(|e| format!("Error starting process: {}", e))
     .await?;
 
-    stdio_printer
+    // Spawn a task to copy stdout/stderr to stdio.
+    let output_stream = child.output_stream.take().unwrap();
+    let stdio_printer = async move { tokio::spawn(handle_stdio(output_stream)).await.unwrap() };
+
+    let (_, exit_code) = future::try_join(stdio_printer, child.wait())
         .await
-        .unwrap()
-        .map_err(|e| format!("Error flushing stdio: {}", e))?;
+        .map_err(|e| format!("Error executing process: {}", e))?;
 
     debug!("Exiting with {}", exit_code.0);
     std::process::exit(exit_code.0);
