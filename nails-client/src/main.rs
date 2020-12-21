@@ -13,7 +13,8 @@ use log::debug;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use nails::execution::{child_channel, send_to_io, stream_for, ChildInput, ChildOutput, Command};
+use nails::client::{ChildInput, ChildOutput};
+use nails::execution::{child_channel, send_to_io, stream_for, Command};
 
 ///
 /// Split env::args into a nailgun server address, and the args to send to the server.
@@ -51,10 +52,6 @@ async fn handle_stdio(
         match output {
             ChildOutput::Stdout(bytes) => stdout.write_all(&bytes).await?,
             ChildOutput::Stderr(bytes) => stderr.write_all(&bytes).await?,
-            ChildOutput::Exit(_) => {
-                // NB: We ignore exit here and allow the main thread to handle exiting.
-                break;
-            }
         }
     }
     Ok(())

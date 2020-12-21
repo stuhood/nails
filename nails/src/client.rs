@@ -4,6 +4,7 @@ use std::io;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::future::{AbortHandle, Abortable, Aborted, BoxFuture};
 use futures::stream::BoxStream;
@@ -16,8 +17,16 @@ use tokio::time::delay_for;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
-use crate::execution::{child_channel, send_to_io, ChildInput, ChildOutput, Command, ExitCode};
+use crate::execution::{child_channel, send_to_io, Command, ExitCode};
 use crate::Config;
+
+pub type ChildInput = crate::execution::ChildInput;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChildOutput {
+    Stdout(Bytes),
+    Stderr(Bytes),
+}
 
 pub struct Child {
     ///
@@ -221,12 +230,7 @@ async fn handle_stdio<S: ServerSink>(
             }
             OutputChunk::Exit(code) => {
                 trace!("nails client got exit code: {}", code);
-                let code = ExitCode(code);
-                cli_write
-                    .send(ChildOutput::Exit(code))
-                    .map_err(|e| send_to_io(e))
-                    .await?;
-                return Ok(code);
+                return Ok(ExitCode(code));
             }
         }
     }

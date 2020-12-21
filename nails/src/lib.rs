@@ -57,7 +57,7 @@ pub trait Nail: Clone + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::{client, server, Config, Nail};
-    use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
+    use crate::execution::{self, child_channel, Command, ExitCode};
 
     use std::future::Future;
     use std::io;
@@ -112,12 +112,15 @@ mod tests {
             let expected_bytes = expected_bytes.clone();
             let stream = TcpStream::connect(&addr).await.unwrap();
             client::handle_connection(Config::default(), stream, cmd, async {
-                let (mut stdin_write, stdin_read) = child_channel::<ChildInput>();
+                let (mut stdin_write, stdin_read) = child_channel::<client::ChildInput>();
                 stdin_write
-                    .send(ChildInput::Stdin(expected_bytes))
+                    .send(client::ChildInput::Stdin(expected_bytes))
                     .await
                     .unwrap();
-                stdin_write.send(ChildInput::StdinEOF).await.unwrap();
+                stdin_write
+                    .send(client::ChildInput::StdinEOF)
+                    .await
+                    .unwrap();
                 stdin_read
             })
             .await
@@ -125,7 +128,7 @@ mod tests {
         };
 
         assert_eq!(
-            ChildOutput::Stdout(expected_bytes),
+            client::ChildOutput::Stdout(expected_bytes),
             child.output_stream.take().unwrap().next().await.unwrap()
         );
         assert_eq!(ExitCode(0), child.wait().await.unwrap());
@@ -155,7 +158,7 @@ mod tests {
         let mut child = {
             let stream = TcpStream::connect(&addr).await.unwrap();
             client::handle_connection(Config::default(), stream, cmd, async {
-                let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
+                let (_stdin_write, stdin_read) = child_channel::<client::ChildInput>();
                 stdin_read
             })
             .await
@@ -257,7 +260,7 @@ mod tests {
             .await
             .map_err(|e| format!("Error connecting to server: {}", e))?;
         let child = client::handle_connection(config, stream, command, async {
-            let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
+            let (_stdin_write, stdin_read) = child_channel::<client::ChildInput>();
             stdin_read
         })
         .await
@@ -278,7 +281,7 @@ mod tests {
         fn spawn(
             &self,
             _: Command,
-            input_stream: mpsc::Receiver<ChildInput>,
+            input_stream: mpsc::Receiver<execution::ChildInput>,
         ) -> Result<server::Child, io::Error> {
             let nail = self.clone();
             let output = async move {
@@ -286,16 +289,16 @@ mod tests {
                     tokio::select! {
                       _ = delay_for(delay_duration) => {
                           // We delayed and then exited successfully.
-                          ChildOutput::Exit(nail.1)
+                          execution::ChildOutput::Exit(nail.1)
                       }
                       _ = input_stream.fold((), |(), _| async {}) => {
                           // We were cancelled: exit immediately unsuccessfully.
-                          ChildOutput::Exit(ExitCode(-2))
+                          execution::ChildOutput::Exit(ExitCode(-2))
                       }
                     }
                 } else {
                     // No delay: exit immediately without handling cancellation.
-                    ChildOutput::Exit(nail.1)
+                    execution::ChildOutput::Exit(nail.1)
                 }
             };
             Ok(server::Child {
@@ -312,21 +315,21 @@ mod tests {
         fn spawn(
             &self,
             _: Command,
-            mut input_stream: mpsc::Receiver<ChildInput>,
+            mut input_stream: mpsc::Receiver<execution::ChildInput>,
         ) -> Result<server::Child, io::Error> {
             let output = async move {
                 log::info!("Server spawned thread!");
                 let input_bytes = match input_stream.next().await {
-                    Some(ChildInput::Stdin(bytes)) => bytes,
+                    Some(execution::ChildInput::Stdin(bytes)) => bytes,
                     x => panic!("Unexpected input: {:?}", x),
                 };
                 match input_stream.next().await {
-                    Some(ChildInput::StdinEOF) => (),
+                    Some(execution::ChildInput::StdinEOF) => (),
                     x => panic!("Unexpected input: {:?}", x),
                 };
                 stream::iter(vec![
-                    ChildOutput::Stdout(input_bytes),
-                    ChildOutput::Exit(ExitCode(0)),
+                    execution::ChildOutput::Stdout(input_bytes),
+                    execution::ChildOutput::Exit(ExitCode(0)),
                 ])
             };
             Ok(server::Child {
