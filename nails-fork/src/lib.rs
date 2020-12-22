@@ -1,11 +1,14 @@
 use std::io;
 use std::process::Stdio;
+use std::sync::Arc;
 
-use futures::channel::mpsc;
-use futures::{stream, FutureExt, SinkExt, StreamExt, TryStreamExt};
+use futures::{stream, FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
 use tokio::process::Command;
+use tokio::sync::Notify;
 
-use nails::execution::{self, sink_for, stream_for, ChildInput, ChildOutput, ExitCode};
+use nails::execution::{
+    self, child_channel, sink_for, stream_for, ChildInput, ChildOutput, ExitCode,
+};
 use nails::{server, Nail};
 
 /// A Nail implementation that forks processes.
@@ -13,11 +16,7 @@ use nails::{server, Nail};
 pub struct ForkNail;
 
 impl Nail for ForkNail {
-    fn spawn(
-        &self,
-        cmd: execution::Command,
-        input_stream: mpsc::Receiver<ChildInput>,
-    ) -> Result<server::Child, io::Error> {
+    fn spawn(&self, cmd: execution::Command) -> Result<server::Child, io::Error> {
         let mut child = Command::new(cmd.command.clone())
             .args(cmd.args)
             .env_clear()
@@ -30,15 +29,11 @@ impl Nail for ForkNail {
             .spawn()?;
 
         // Copy inputs to the child.
+        let (stdin_write, stdin_read) = child_channel::<ChildInput>();
         let stdin = child.stdin.take().unwrap();
         tokio::spawn(async move {
-            let mut input_stream = input_stream.filter_map(|child_input| {
-                Box::pin(async move {
-                    match child_input {
-                        ChildInput::Stdin(bytes) => Some(Ok(bytes)),
-                        ChildInput::StdinEOF => None,
-                    }
-                })
+            let mut input_stream = stdin_read.map(|child_input| match child_input {
+                ChildInput::Stdin(bytes) => Ok(bytes),
             });
             sink_for(stdin)
                 .send_all(&mut input_stream)
@@ -51,23 +46,35 @@ impl Nail for ForkNail {
             .map_ok(|bytes| ChildOutput::Stdout(bytes.into()));
         let stderr_stream = stream_for(child.stderr.take().unwrap())
             .map_ok(|bytes| ChildOutput::Stderr(bytes.into()));
-        let exit_stream = child
-            .into_stream()
-            .map_ok(|exit_status| ChildOutput::Exit(ExitCode(exit_status.code().unwrap_or(-1))));
-        let output_stream = stream::select(stdout_stream, stderr_stream)
-            .chain(exit_stream)
-            .map(|res| match res {
-                Ok(o) => o,
-                Err(e) => {
-                    log::warn!("IO error interacting with child process: {:?}", e);
-                    ChildOutput::Exit(ExitCode(-1))
-                }
-            })
-            .boxed();
+        let output_stream = stream::select(stdout_stream, stderr_stream).boxed();
 
-        Ok(server::Child {
+        let killed = Arc::new(Notify::new());
+        let killed2 = killed.clone();
+
+        let shutdown = async move {
+            killed2.notify();
+        };
+
+        let exit_code = async move {
+            tokio::select! {
+              res = &mut child => {
+                res
+              }
+              _ = killed.notified() => {
+                // Kill the child process, and then await it to avoid zombies.
+                child.kill()?;
+                child.await
+              }
+            }
+        };
+
+        Ok(server::Child::new(
             output_stream,
-            accepts_stdin: true,
-        })
+            Some(stdin_write),
+            exit_code
+                .map_ok(|exit_status| ExitCode(exit_status.code().unwrap_or(-1)))
+                .boxed(),
+            Some(shutdown.boxed()),
+        ))
     }
 }

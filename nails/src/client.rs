@@ -4,7 +4,6 @@ use std::io;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::future::{AbortHandle, Abortable, Aborted, BoxFuture};
 use futures::stream::BoxStream;
@@ -17,16 +16,8 @@ use tokio::time::delay_for;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
-use crate::execution::{child_channel, send_to_io, Command, ExitCode};
+use crate::execution::{child_channel, send_to_io, ChildInput, ChildOutput, Command, ExitCode};
 use crate::Config;
-
-pub type ChildInput = crate::execution::ChildInput;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ChildOutput {
-    Stdout(Bytes),
-    Stderr(Bytes),
-}
 
 pub struct Child {
     ///
@@ -43,7 +34,7 @@ pub struct Child {
     ///
     /// A callable to shut down the write half of the connection upon request.
     ///
-    shutdown_fut: Option<BoxFuture<'static, ()>>,
+    shutdown: Option<BoxFuture<'static, ()>>,
     ///
     /// A handle to cancel the background task managing the connection when the Child is dropped.
     ///
@@ -61,8 +52,8 @@ impl Child {
     /// the server).
     ///
     pub async fn shutdown(&mut self) {
-        if let Some(shutdown_fut) = self.shutdown_fut.take() {
-            shutdown_fut.await;
+        if let Some(shutdown) = self.shutdown.take() {
+            shutdown.await;
         }
     }
 
@@ -149,7 +140,7 @@ where
     let server_write = Arc::new(Mutex::new(Some(server_write)));
 
     // Calls to shutdown will drop the write half of the socket.
-    let shutdown_fut = {
+    let shutdown = {
         let server_write = server_write.clone();
         async move {
             // Take and drop the write half of the connection (if it has not already been dropped).
@@ -191,7 +182,7 @@ where
     Ok(Child {
         output_stream: Some(cli_read.boxed()),
         exit_code: Some(exit_code),
-        shutdown_fut: Some(shutdown_fut.boxed()),
+        shutdown: Some(shutdown.boxed()),
         abort_handle,
     })
 }
@@ -244,22 +235,20 @@ async fn stdin_sender<S: ServerSink>(
     mut cli_read: mpsc::Receiver<ChildInput>,
 ) -> Result<(), io::Error> {
     while let Some(input_chunk) = cli_read.next().await {
-        let mut server_write_guard = server_write.lock().await;
-        let server_write = if let Some(ref mut server_write) = *server_write_guard {
-            server_write
+        if let Some(ref mut server_write) = *server_write.lock().await {
+            match input_chunk {
+                ChildInput::Stdin(bytes) => {
+                    trace!("nails client sending {} bytes of stdin.", bytes.len());
+                    server_write.send(InputChunk::Stdin(bytes)).await?;
+                }
+            }
         } else {
             break;
         };
-        match input_chunk {
-            ChildInput::Stdin(bytes) => {
-                trace!("nails client sending {} bytes of stdin.", bytes.len());
-                server_write.send(InputChunk::Stdin(bytes)).await?;
-            }
-            ChildInput::StdinEOF => {
-                server_write.send(InputChunk::StdinEOF).await?;
-                break;
-            }
-        }
+    }
+
+    if let Some(ref mut server_write) = *server_write.lock().await {
+        server_write.send(InputChunk::StdinEOF).await?;
     }
     Ok(())
 }

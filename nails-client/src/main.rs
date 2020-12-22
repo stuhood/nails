@@ -13,8 +13,7 @@ use log::debug;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use nails::client::{ChildInput, ChildOutput};
-use nails::execution::{child_channel, send_to_io, stream_for, Command};
+use nails::execution::{child_channel, send_to_io, stream_for, ChildInput, ChildOutput, Command};
 
 ///
 /// Split env::args into a nailgun server address, and the args to send to the server.
@@ -65,10 +64,6 @@ async fn handle_stdin(mut stdin_write: mpsc::Sender<ChildInput>) -> Result<(), i
             .await
             .map_err(send_to_io)?;
     }
-    stdin_write
-        .send(ChildInput::StdinEOF)
-        .await
-        .map_err(send_to_io)?;
     Ok(())
 }
 

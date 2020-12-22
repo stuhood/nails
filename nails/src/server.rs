@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::mpsc;
+use futures::future::{AbortHandle, Abortable, Aborted, BoxFuture};
 use futures::stream::BoxStream;
-use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -14,12 +15,57 @@ use tokio::time::timeout;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{InputChunk, OutputChunk, ServerCodec};
-use crate::execution::{child_channel, send_to_io, Args, ChildInput, ChildOutput, Command, Env};
+use crate::execution::{send_to_io, Args, ChildInput, ChildOutput, Command, Env, ExitCode};
 use crate::{Config, Nail};
 
 pub struct Child {
-    pub output_stream: BoxStream<'static, ChildOutput>,
-    pub accepts_stdin: bool,
+    ///
+    /// A stream of outputs from the local child process.
+    ///
+    /// Similar to `std::process::Child`, you should `take` this instance to avoid partial moves:
+    ///   let output_stream = child.output_stream.take().unwrap();
+    ///
+    output_stream: Option<BoxStream<'static, Result<ChildOutput, io::Error>>>,
+    ///
+    /// If the Nail implementation accepts stdin, a sink for stdin.
+    ///
+    /// Similar to `std::process::Child`, you should `take` this instance to avoid partial moves:
+    ///   let input_sink = child.input_sink.take().unwrap();
+    ///
+    input_sink: Option<mpsc::Sender<ChildInput>>,
+    ///
+    /// A future for the exit code of the local process. The server guarantees to `spawn` this
+    /// future, and to cancel it on errors interacting with the socket.
+    ///
+    exit_code: Option<BoxFuture<'static, Result<ExitCode, io::Error>>>,
+    ///
+    /// A callable that indicates that the client has attempted a clean shutdown of this connection.
+    ///
+    shutdown: Option<BoxFuture<'static, ()>>,
+}
+
+impl Child {
+    pub fn new(
+        output_stream: BoxStream<'static, Result<ChildOutput, io::Error>>,
+        input_sink: Option<mpsc::Sender<ChildInput>>,
+        exit_code: BoxFuture<'static, Result<ExitCode, io::Error>>,
+        shutdown: Option<BoxFuture<'static, ()>>,
+    ) -> Child {
+        Child {
+            output_stream: Some(output_stream),
+            input_sink,
+            exit_code: Some(exit_code),
+            shutdown,
+        }
+    }
+}
+
+struct AbortOnDrop(AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 ///
@@ -57,11 +103,10 @@ where
         }
     };
 
-    // Create channels for stdio with the forked subprocess, and spawn the process.
-    let (stdin_write, stdin_read) = child_channel::<ChildInput>();
+    // Spawn the process.
     let command_desc = command.command.clone();
-    let (accept_stdin, process_read) = match nail.spawn(command, stdin_read) {
-        Ok(child) => (child.accepts_stdin, child.output_stream),
+    let mut child = match nail.spawn(command) {
+        Ok(child) => child,
         Err(e) => {
             let e = format!("Failed to launch child `{}`: {:?}\n", command_desc, e);
             client_write.send(OutputChunk::Stderr(e.into())).await?;
@@ -69,23 +114,46 @@ where
             return Ok(());
         }
     };
+    let process_read = child.output_stream.take().unwrap();
+    let stdin_write = child.input_sink.take();
+    let shutdown = child.shutdown.take();
 
     // Spawn a task to consume client inputs, which might include any combination of heartbeat and
     // stdin messages.
     let client_write = Arc::new(Mutex::new(client_write));
-    let _join = {
+    let input_task = {
         let client_write = client_write.clone();
         tokio::spawn(input(
             config.clone(),
-            accept_stdin,
             client_write,
             client_read,
             stdin_write,
+            shutdown,
         ))
     };
 
-    // Loop writing stdout/stderr to the client.
-    output(process_read, client_write).await
+    // Spawn the nail itself, wrapped in an Abortable.
+    let (nail_task, _abort_on_drop) = {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let nail_task = tokio::spawn(
+            Abortable::new(child.exit_code.take().unwrap(), abort_registration).map(
+                |res| match res {
+                    Ok(res) => res,
+                    Err(Aborted) => Ok(ExitCode(-1)),
+                },
+            ),
+        );
+        (nail_task, AbortOnDrop(abort_handle))
+    };
+
+    // Loop writing stdout/stderr to the client, then join the input task.
+    output(process_read, &client_write).await?;
+    input_task.await??;
+
+    // Finally, await and send the exit code.
+    let exit_code = nail_task.await??;
+    let mut client_write = client_write.lock().await;
+    client_write.send(OutputChunk::Exit(exit_code.0)).await
 }
 
 ///
@@ -131,31 +199,14 @@ async fn initialize(
 /// Handles reading stdio from the child process and writing it to the client socket.
 ///
 async fn output<C: ClientSink>(
-    mut process_read: BoxStream<'_, ChildOutput>,
-    client_write: Arc<Mutex<C>>,
+    mut process_read: BoxStream<'_, Result<ChildOutput, io::Error>>,
+    client_write: &Arc<Mutex<C>>,
 ) -> Result<(), io::Error> {
-    loop {
-        let child_output = match process_read.next().await {
-            Some(child_output) => child_output,
-            None => {
-                // Process exited without sending an exit code... strange, but not fatal.
-                break Ok(());
-            }
-        };
-
-        // We have a valid child output to send.
-        let exiting = match child_output {
-            ChildOutput::Exit(_) => true,
-            _ => false,
-        };
-
+    while let Some(child_output) = process_read.next().await {
         let mut client_write = client_write.lock().await;
-        client_write.send(child_output.into()).await?;
-
-        if exiting {
-            return Ok(());
-        }
+        client_write.send(child_output?.into()).await?;
     }
+    Ok(())
 }
 
 ///
@@ -164,13 +215,13 @@ async fn output<C: ClientSink>(
 ///
 async fn input<C: ClientSink>(
     config: Config,
-    accept_stdin: bool,
     client_write: Arc<Mutex<C>>,
     mut client_read: impl Stream<Item = Result<InputChunk, io::Error>> + Unpin,
-    mut process_write: mpsc::Sender<ChildInput>,
+    mut process_write: Option<mpsc::Sender<ChildInput>>,
+    shutdown: Option<BoxFuture<'static, ()>>,
 ) -> Result<(), io::Error> {
     // If the process will accept stdin, send the StartReadingStdin chunk.
-    if accept_stdin {
+    if process_write.is_some() {
         let mut client_write = client_write.lock().await;
         client_write.send(OutputChunk::StartReadingStdin).await?;
     }
@@ -186,13 +237,16 @@ async fn input<C: ClientSink>(
         // We have a valid chunk.
         match input_chunk {
             InputChunk::Stdin(bytes) => {
-                if !accept_stdin {
-                    return Err(err(&format!("The StartReadingStdin chunk was not sent: did not expect to receive stdin.")));
+                if let Some(ref mut process_write) = process_write.as_mut() {
+                    process_write
+                        .send(ChildInput::Stdin(bytes))
+                        .map_err(send_to_io)
+                        .await?;
+                } else {
+                    return Err(err(&format!(
+                        "The StartReadingStdin chunk was not sent, or Stdin was already closed."
+                    )));
                 }
-                process_write
-                    .send(ChildInput::Stdin(bytes))
-                    .map_err(send_to_io)
-                    .await?;
                 // If noisy_stdin is configured, we respond to every new chunk with `StartReadingStdin`.
                 if config.noisy_stdin {
                     let mut client_write = client_write.lock().await;
@@ -200,13 +254,10 @@ async fn input<C: ClientSink>(
                 }
             }
             InputChunk::StdinEOF => {
-                if !accept_stdin {
+                // Drop the stdin Sink.
+                if let None = process_write.take() {
                     return Err(err(&format!("The StartReadingStdin chunk was not sent: did not expect to receive stdin.")));
                 }
-                process_write
-                    .send(ChildInput::StdinEOF)
-                    .map_err(send_to_io)
-                    .await?;
             }
             InputChunk::Heartbeat => {}
             c => {
@@ -217,6 +268,11 @@ async fn input<C: ClientSink>(
             }
         }
     };
+
+    // The input stream is closed, or heartbeats did not arrive in time. Trigger shutdown.
+    if let Some(shutdown) = shutdown {
+        shutdown.await;
+    }
 
     res
 }
@@ -253,7 +309,6 @@ impl From<ChildOutput> for OutputChunk {
         match co {
             ChildOutput::Stdout(bytes) => OutputChunk::Stdout(bytes),
             ChildOutput::Stderr(bytes) => OutputChunk::Stderr(bytes),
-            ChildOutput::Exit(code) => OutputChunk::Exit(code.0),
         }
     }
 }

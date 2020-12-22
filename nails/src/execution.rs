@@ -29,14 +29,12 @@ pub struct Command {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChildInput {
     Stdin(Bytes),
-    StdinEOF,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChildOutput {
     Stdout(Bytes),
     Stderr(Bytes),
-    Exit(ExitCode),
 }
 
 ///

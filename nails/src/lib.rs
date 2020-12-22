@@ -6,9 +6,7 @@ pub mod server;
 use std::io;
 use std::time::Duration;
 
-use futures::channel::mpsc;
-
-use crate::execution::{ChildInput, Command};
+use crate::execution::Command;
 
 #[derive(Default, Clone)]
 pub struct Config {
@@ -42,22 +40,15 @@ impl Config {
 
 pub trait Nail: Clone + Send + Sync + 'static {
     ///
-    /// Spawns an instance of the nail and returns a Child. Regardless of whether the child
-    /// indicates that stdin is accepted, the input_stream will remain open as long as the client
-    /// is alive (ie, has a healthy socket and is sending heartbeats). If the client disconnects
-    /// or times out the input_stream will be closed.
+    /// Spawns an instance of the nail and returns a server::Child.
     ///
-    fn spawn(
-        &self,
-        cmd: Command,
-        input_stream: mpsc::Receiver<ChildInput>,
-    ) -> Result<server::Child, io::Error>;
+    fn spawn(&self, cmd: Command) -> Result<server::Child, io::Error>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::{client, server, Config, Nail};
-    use crate::execution::{self, child_channel, Command, ExitCode};
+    use crate::execution::{child_channel, ChildInput, ChildOutput, Command, ExitCode};
 
     use std::future::Future;
     use std::io;
@@ -112,15 +103,12 @@ mod tests {
             let expected_bytes = expected_bytes.clone();
             let stream = TcpStream::connect(&addr).await.unwrap();
             client::handle_connection(Config::default(), stream, cmd, async {
-                let (mut stdin_write, stdin_read) = child_channel::<client::ChildInput>();
+                let (mut stdin_write, stdin_read) = child_channel::<ChildInput>();
                 stdin_write
-                    .send(client::ChildInput::Stdin(expected_bytes))
+                    .send(ChildInput::Stdin(expected_bytes))
                     .await
                     .unwrap();
-                stdin_write
-                    .send(client::ChildInput::StdinEOF)
-                    .await
-                    .unwrap();
+                stdin_write.send(ChildInput::StdinEOF).await.unwrap();
                 stdin_read
             })
             .await
@@ -128,7 +116,7 @@ mod tests {
         };
 
         assert_eq!(
-            client::ChildOutput::Stdout(expected_bytes),
+            ChildOutput::Stdout(expected_bytes),
             child.output_stream.take().unwrap().next().await.unwrap()
         );
         assert_eq!(ExitCode(0), child.wait().await.unwrap());
@@ -158,7 +146,7 @@ mod tests {
         let mut child = {
             let stream = TcpStream::connect(&addr).await.unwrap();
             client::handle_connection(Config::default(), stream, cmd, async {
-                let (_stdin_write, stdin_read) = child_channel::<client::ChildInput>();
+                let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
                 stdin_read
             })
             .await
@@ -260,7 +248,7 @@ mod tests {
             .await
             .map_err(|e| format!("Error connecting to server: {}", e))?;
         let child = client::handle_connection(config, stream, command, async {
-            let (_stdin_write, stdin_read) = child_channel::<client::ChildInput>();
+            let (_stdin_write, stdin_read) = child_channel::<ChildInput>();
             stdin_read
         })
         .await
@@ -281,7 +269,7 @@ mod tests {
         fn spawn(
             &self,
             _: Command,
-            input_stream: mpsc::Receiver<execution::ChildInput>,
+            input_stream: mpsc::Receiver<ChildInput>,
         ) -> Result<server::Child, io::Error> {
             let nail = self.clone();
             let output = async move {
@@ -289,16 +277,16 @@ mod tests {
                     tokio::select! {
                       _ = delay_for(delay_duration) => {
                           // We delayed and then exited successfully.
-                          execution::ChildOutput::Exit(nail.1)
+                          ChildOutput::Exit(nail.1)
                       }
                       _ = input_stream.fold((), |(), _| async {}) => {
                           // We were cancelled: exit immediately unsuccessfully.
-                          execution::ChildOutput::Exit(ExitCode(-2))
+                          ChildOutput::Exit(ExitCode(-2))
                       }
                     }
                 } else {
                     // No delay: exit immediately without handling cancellation.
-                    execution::ChildOutput::Exit(nail.1)
+                    ChildOutput::Exit(nail.1)
                 }
             };
             Ok(server::Child {
@@ -315,21 +303,21 @@ mod tests {
         fn spawn(
             &self,
             _: Command,
-            mut input_stream: mpsc::Receiver<execution::ChildInput>,
+            mut input_stream: mpsc::Receiver<ChildInput>,
         ) -> Result<server::Child, io::Error> {
             let output = async move {
                 log::info!("Server spawned thread!");
                 let input_bytes = match input_stream.next().await {
-                    Some(execution::ChildInput::Stdin(bytes)) => bytes,
+                    Some(ChildInput::Stdin(bytes)) => bytes,
                     x => panic!("Unexpected input: {:?}", x),
                 };
                 match input_stream.next().await {
-                    Some(execution::ChildInput::StdinEOF) => (),
+                    Some(ChildInput::StdinEOF) => (),
                     x => panic!("Unexpected input: {:?}", x),
                 };
                 stream::iter(vec![
-                    execution::ChildOutput::Stdout(input_bytes),
-                    execution::ChildOutput::Exit(ExitCode(0)),
+                    ChildOutput::Stdout(input_bytes),
+                    ChildOutput::Exit(ExitCode(0)),
                 ])
             };
             Ok(server::Child {
