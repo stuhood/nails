@@ -22,4 +22,5 @@ tokio = { version = "0.2", features = ["sync", "tcp", "time"] }
 tokio-util = { version = "0.2", features = ["codec"] }
 
 [dev-dependencies]
+env_logger = "0.5"
 tokio = { version = "0.2", features = ["dns", "macros", "rt-core", "stream"] }

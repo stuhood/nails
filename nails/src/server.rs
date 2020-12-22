@@ -37,7 +37,7 @@ pub struct Child {
     /// A future for the exit code of the local process. The server guarantees to `spawn` this
     /// future, and to cancel it on errors interacting with the socket.
     ///
-    exit_code: Option<BoxFuture<'static, Result<ExitCode, io::Error>>>,
+    exit_code: Option<BoxFuture<'static, ExitCode>>,
     ///
     /// A callable that indicates that the client has attempted a clean shutdown of this connection.
     ///
@@ -48,7 +48,7 @@ impl Child {
     pub fn new(
         output_stream: BoxStream<'static, Result<ChildOutput, io::Error>>,
         input_sink: Option<mpsc::Sender<ChildInput>>,
-        exit_code: BoxFuture<'static, Result<ExitCode, io::Error>>,
+        exit_code: BoxFuture<'static, ExitCode>,
         shutdown: Option<BoxFuture<'static, ()>>,
     ) -> Child {
         Child {
@@ -114,6 +114,7 @@ where
             return Ok(());
         }
     };
+
     let process_read = child.output_stream.take().unwrap();
     let stdin_write = child.input_sink.take();
     let shutdown = child.shutdown.take();
@@ -121,7 +122,7 @@ where
     // Spawn a task to consume client inputs, which might include any combination of heartbeat and
     // stdin messages.
     let client_write = Arc::new(Mutex::new(client_write));
-    let input_task = {
+    let _input_task = {
         let client_write = client_write.clone();
         tokio::spawn(input(
             config.clone(),
@@ -139,7 +140,7 @@ where
             Abortable::new(child.exit_code.take().unwrap(), abort_registration).map(
                 |res| match res {
                     Ok(res) => res,
-                    Err(Aborted) => Ok(ExitCode(-1)),
+                    Err(Aborted) => ExitCode(-1),
                 },
             ),
         );
@@ -148,10 +149,9 @@ where
 
     // Loop writing stdout/stderr to the client, then join the input task.
     output(process_read, &client_write).await?;
-    input_task.await??;
 
     // Finally, await and send the exit code.
-    let exit_code = nail_task.await??;
+    let exit_code = nail_task.await?;
     let mut client_write = client_write.lock().await;
     client_write.send(OutputChunk::Exit(exit_code.0)).await
 }

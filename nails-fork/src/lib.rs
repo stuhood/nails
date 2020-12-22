@@ -2,7 +2,7 @@ use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use futures::{stream, FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{stream, FutureExt, SinkExt, StreamExt, TryStreamExt};
 use tokio::process::Command;
 use tokio::sync::Notify;
 
@@ -72,7 +72,10 @@ impl Nail for ForkNail {
             output_stream,
             Some(stdin_write),
             exit_code
-                .map_ok(|exit_status| ExitCode(exit_status.code().unwrap_or(-1)))
+                .map(|res| match res {
+                    Ok(exit_status) => ExitCode(exit_status.code().unwrap_or(-1)),
+                    Err(_) => ExitCode(-1),
+                })
                 .boxed(),
             Some(shutdown.boxed()),
         ))

@@ -53,17 +53,19 @@ mod tests {
     use std::future::Future;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use bytes::Bytes;
-    use futures::channel::mpsc;
     use futures::stream;
     use futures::{FutureExt, SinkExt, StreamExt};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Notify;
     use tokio::time::delay_for;
 
     #[tokio::test]
     async fn roundtrip_noop() {
+        let _logger = env_logger::try_init();
         let expected_exit_code = ExitCode(67);
         let (addr, _) =
             one_connection_server(Config::default(), ConstantNail(None, expected_exit_code)).await;
@@ -108,7 +110,6 @@ mod tests {
                     .send(ChildInput::Stdin(expected_bytes))
                     .await
                     .unwrap();
-                stdin_write.send(ChildInput::StdinEOF).await.unwrap();
                 stdin_read
             })
             .await
@@ -266,33 +267,36 @@ mod tests {
     struct ConstantNail(Option<Duration>, ExitCode);
 
     impl Nail for ConstantNail {
-        fn spawn(
-            &self,
-            _: Command,
-            input_stream: mpsc::Receiver<ChildInput>,
-        ) -> Result<server::Child, io::Error> {
+        fn spawn(&self, _: Command) -> Result<server::Child, io::Error> {
             let nail = self.clone();
-            let output = async move {
+            let killed = Arc::new(Notify::new());
+            let killed2 = killed.clone();
+            let shutdown = async move {
+                killed2.notify();
+            };
+            let exit_code = async move {
                 if let Some(delay_duration) = nail.0 {
                     tokio::select! {
                       _ = delay_for(delay_duration) => {
                           // We delayed and then exited successfully.
-                          ChildOutput::Exit(nail.1)
+                          nail.1
                       }
-                      _ = input_stream.fold((), |(), _| async {}) => {
+                      _ = killed.notified() => {
                           // We were cancelled: exit immediately unsuccessfully.
-                          ChildOutput::Exit(ExitCode(-2))
+                          ExitCode(-2)
                       }
                     }
                 } else {
                     // No delay: exit immediately without handling cancellation.
-                    ChildOutput::Exit(nail.1)
+                    nail.1
                 }
             };
-            Ok(server::Child {
-                output_stream: output.into_stream().boxed(),
-                accepts_stdin: false,
-            })
+            Ok(server::Child::new(
+                stream::iter(vec![]).boxed(),
+                None,
+                exit_code.boxed(),
+                Some(shutdown.boxed()),
+            ))
         }
     }
 
@@ -300,30 +304,27 @@ mod tests {
     struct StdoutEchoNail;
 
     impl Nail for StdoutEchoNail {
-        fn spawn(
-            &self,
-            _: Command,
-            mut input_stream: mpsc::Receiver<ChildInput>,
-        ) -> Result<server::Child, io::Error> {
+        fn spawn(&self, _: Command) -> Result<server::Child, io::Error> {
+            let (stdin_write, mut stdin_read) = child_channel::<ChildInput>();
             let output = async move {
                 log::info!("Server spawned thread!");
-                let input_bytes = match input_stream.next().await {
+                let input_bytes = match stdin_read.next().await {
                     Some(ChildInput::Stdin(bytes)) => bytes,
                     x => panic!("Unexpected input: {:?}", x),
                 };
-                match input_stream.next().await {
-                    Some(ChildInput::StdinEOF) => (),
-                    x => panic!("Unexpected input: {:?}", x),
+                if let Some(x) = stdin_read.next().await {
+                    panic!("Unexpected input: {:?}", x);
                 };
-                stream::iter(vec![
-                    ChildOutput::Stdout(input_bytes),
-                    ChildOutput::Exit(ExitCode(0)),
-                ])
+                stream::iter(vec![Ok(ChildOutput::Stdout(input_bytes))])
             };
-            Ok(server::Child {
-                output_stream: output.into_stream().flatten().boxed(),
-                accepts_stdin: true,
-            })
+
+            let exit_code = async move { ExitCode(0) };
+            Ok(server::Child::new(
+                output.into_stream().flatten().boxed(),
+                Some(stdin_write),
+                exit_code.boxed(),
+                None,
+            ))
         }
     }
 }
