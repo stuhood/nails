@@ -1,6 +1,6 @@
 [package]
 name = "nails-fork"
-version = "0.9.0"
+version = "0.10.0"
 authors = ["Stu Hood <stuhood@gmail.com>"]
 license = "Apache-2.0"
 readme = "../README.md"
@@ -15,6 +15,6 @@ edition = "2018"
 bytes = "0.5"
 futures = "0.3"
 log = "0.4"
-nails = { path = "../nails", version = "=0.9.0" }
+nails = { path = "../nails", version = "=0.10.0" }
 tokio = { version = "0.2", features = ["rt-core", "process"] }
 tokio-util = { version = "0.2", features = ["codec"] }
