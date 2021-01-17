@@ -272,7 +272,7 @@ mod tests {
             let killed = Arc::new(Notify::new());
             let killed2 = killed.clone();
             let shutdown = async move {
-                killed2.notify_waiters();
+                killed2.notify_one();
             };
             let exit_code = async move {
                 if let Some(delay_duration) = nail.0 {
