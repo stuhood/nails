@@ -14,13 +14,13 @@ a nailgun server.
 edition = "2018"
 
 [dependencies]
-bytes = "0.5"
+bytes = "1.0"
 byteorder = "1"
 futures = "0.3"
 log = "0.4"
-tokio = { version = "0.2", features = ["sync", "tcp", "time"] }
-tokio-util = { version = "0.2", features = ["codec"] }
+tokio = { version = "1.0", features = ["net", "sync", "time"] }
+tokio-util = { version = "0.6", features = ["codec"] }
 
 [dev-dependencies]
 env_logger = "0.5"
-tokio = { version = "0.2", features = ["dns", "macros", "rt-core", "stream"] }
+tokio = { version = "1.0", features = ["macros", "net", "rt"] }
