@@ -54,11 +54,10 @@ impl Decoder for ClientCodec {
     }
 }
 
-impl Encoder for ClientCodec {
-    type Item = InputChunk;
+impl Encoder<InputChunk> for ClientCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, msg: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
+    fn encode(&mut self, msg: InputChunk, buf: &mut BytesMut) -> io::Result<()> {
         encode(Chunk::Input(msg), buf)
     }
 }
@@ -82,11 +81,10 @@ impl Decoder for ServerCodec {
     }
 }
 
-impl Encoder for ServerCodec {
-    type Item = OutputChunk;
+impl Encoder<OutputChunk> for ServerCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, msg: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
+    fn encode(&mut self, msg: OutputChunk, buf: &mut BytesMut) -> io::Result<()> {
         encode(Chunk::Output(msg), buf)
     }
 }

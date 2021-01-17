@@ -77,8 +77,7 @@ impl Decoder for IdentityCodec {
     }
 }
 
-impl Encoder for IdentityCodec {
-    type Item = Bytes;
+impl Encoder<Bytes> for IdentityCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Bytes, buf: &mut BytesMut) -> Result<(), io::Error> {

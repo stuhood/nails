@@ -52,18 +52,18 @@ impl Nail for ForkNail {
         let killed2 = killed.clone();
 
         let shutdown = async move {
-            killed2.notify();
+            killed2.notify_waiters();
         };
 
         let exit_code = async move {
             tokio::select! {
-              res = &mut child => {
+              res = child.wait() => {
                 res
               }
               _ = killed.notified() => {
                 // Kill the child process, and then await it to avoid zombies.
-                child.kill()?;
-                child.await
+                child.kill().await?;
+                child.wait().await
               }
             }
         };
