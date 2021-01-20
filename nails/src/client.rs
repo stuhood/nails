@@ -12,7 +12,6 @@ use log::{debug, trace};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::time::delay_for;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientCodec, InputChunk, OutputChunk};
@@ -260,7 +259,7 @@ async fn heartbeat_sender<S: ServerSink>(
     loop {
         // Wait a fraction of the desired frequency (which from a client's perspective is a
         // minimum: more frequent is fine).
-        delay_for(heartbeat_frequency / 4).await;
+        tokio::time::sleep(heartbeat_frequency / 4).await;
 
         // Then, if the connection might still be alive...
         if let Some(server_write) = server_write.upgrade() {

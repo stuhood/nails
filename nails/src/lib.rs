@@ -61,7 +61,7 @@ mod tests {
     use futures::{FutureExt, SinkExt, StreamExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Notify;
-    use tokio::time::delay_for;
+    use tokio::time::sleep;
 
     #[tokio::test]
     async fn roundtrip_noop() {
@@ -224,11 +224,11 @@ mod tests {
         config: Config,
         nail: impl Nail,
     ) -> (std::net::SocketAddr, impl Future<Output = ()>) {
-        let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
-            let socket = listener.incoming().next().await.unwrap().unwrap();
+            let socket = listener.accept().await.unwrap().0;
             println!("Got connection: {:?}", socket);
             server::handle_connection(config.clone(), nail, socket).await
         })
@@ -272,12 +272,12 @@ mod tests {
             let killed = Arc::new(Notify::new());
             let killed2 = killed.clone();
             let shutdown = async move {
-                killed2.notify();
+                killed2.notify_one();
             };
             let exit_code = async move {
                 if let Some(delay_duration) = nail.0 {
                     tokio::select! {
-                      _ = delay_for(delay_duration) => {
+                      _ = sleep(delay_duration) => {
                           // We delayed and then exited successfully.
                           nail.1
                       }
