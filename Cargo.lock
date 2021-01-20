@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "nails"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "byteorder",
  "bytes",
@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "nails-client"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "env_logger",
  "futures",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "nails-example"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "env_logger",
  "futures",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "nails-fork"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bytes",
  "futures",

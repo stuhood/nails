@@ -1,6 +1,6 @@
 [package]
 name = "nails-example"
-version = "0.11.0"
+version = "0.12.0"
 authors = ["Stu Hood <stuhood@gmail.com>"]
 license = "Apache-2.0"
 readme = "../README.md"
@@ -14,6 +14,6 @@ edition = "2018"
 [dependencies]
 env_logger = "0.8"
 futures = "0.3"
-nails = { path = "../nails", version = "=0.11.0" }
-nails-fork = { path = "../nails-fork", version = "=0.11.0" }
+nails = { path = "../nails", version = "=0.12.0" }
+nails-fork = { path = "../nails-fork", version = "=0.12.0" }
 tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }
