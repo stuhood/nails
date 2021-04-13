@@ -316,7 +316,5 @@ impl From<ChildOutput> for OutputChunk {
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
 ///
- #[cfg_attr(rustfmt, rustfmt_skip)]
 trait ClientSink: Debug + Sink<OutputChunk, Error = io::Error> + Unpin + Send {}
-#[cfg_attr(rustfmt, rustfmt_skip)]
 impl<T> ClientSink for T where T: Debug + Sink<OutputChunk, Error = io::Error> + Unpin + Send {}

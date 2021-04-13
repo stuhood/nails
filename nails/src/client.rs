@@ -282,7 +282,8 @@ fn io_err(e: &str) -> io::Error {
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
 ///
- #[cfg_attr(rustfmt, rustfmt_skip)]
 trait ServerSink: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send + 'static {}
-#[cfg_attr(rustfmt, rustfmt_skip)]
-impl<T> ServerSink for T where T: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send + 'static {}
+impl<T> ServerSink for T where
+    T: Debug + Sink<InputChunk, Error = io::Error> + Unpin + Send + 'static
+{
+}
