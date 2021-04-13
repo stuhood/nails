@@ -2,8 +2,10 @@
 
 name: ci
 on:
-  - push
-  - pull_request
+  push:
+    branches:
+      - main
+  pull_request:
 
 jobs:
   ci:
@@ -13,20 +15,14 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-        rust:
-          - stable
-          - beta
-          - nightly
     
-    name: Rust ${{ matrix.rust }} build on ${{matrix.os}}
+    name: Rust build on ${{matrix.os}}
     steps:
       - uses: actions/checkout@v1
 
-      - uses: actions-rs/toolchain@v1
+      - uses: actions-rs/toolchain@v1.0.6
         with:
           profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
           components: rustfmt, clippy
 
       - uses: actions-rs/cargo@v1
