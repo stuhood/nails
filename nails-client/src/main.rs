@@ -1,7 +1,3 @@
-use nails;
-
-use env_logger;
-
 use std::env;
 use std::io;
 use std::net::SocketAddr;

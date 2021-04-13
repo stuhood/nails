@@ -175,7 +175,7 @@ async fn initialize(
             InputChunk::WorkingDir(w_d) => working_dir = Some(w_d),
             InputChunk::Command(command) => {
                 let working_dir = working_dir
-                    .ok_or_else(|| format!("Did not receive the required working_dir chunk."))?;
+                    .ok_or_else(|| "Did not receive the required working_dir chunk.".to_string())?;
                 return Ok(Command {
                     command,
                     args,
@@ -243,9 +243,9 @@ async fn input<C: ClientSink>(
                         .map_err(send_to_io)
                         .await?;
                 } else {
-                    return Err(err(&format!(
-                        "The StartReadingStdin chunk was not sent, or Stdin was already closed."
-                    )));
+                    return Err(err(
+                        "The StartReadingStdin chunk was not sent, or Stdin was already closed.",
+                    ));
                 }
                 // If noisy_stdin is configured, we respond to every new chunk with `StartReadingStdin`.
                 if config.noisy_stdin {
@@ -253,10 +253,10 @@ async fn input<C: ClientSink>(
                     client_write.send(OutputChunk::StartReadingStdin).await?;
                 }
             }
-            InputChunk::StdinEOF => {
+            InputChunk::StdinEof => {
                 // Drop the stdin Sink.
-                if let None = process_write.take() {
-                    return Err(err(&format!("The StartReadingStdin chunk was not sent: did not expect to receive stdin.")));
+                if process_write.take().is_none() {
+                    return Err(err("The StartReadingStdin chunk was not sent: did not expect to receive stdin."));
                 }
             }
             InputChunk::Heartbeat => {}
@@ -316,7 +316,5 @@ impl From<ChildOutput> for OutputChunk {
 ///
 ///TODO: See https://users.rust-lang.org/t/why-cant-type-aliases-be-used-for-traits/10002/4
 ///
- #[cfg_attr(rustfmt, rustfmt_skip)]
 trait ClientSink: Debug + Sink<OutputChunk, Error = io::Error> + Unpin + Send {}
-#[cfg_attr(rustfmt, rustfmt_skip)]
 impl<T> ClientSink for T where T: Debug + Sink<OutputChunk, Error = io::Error> + Unpin + Send {}

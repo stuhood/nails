@@ -42,10 +42,8 @@ impl Nail for ForkNail {
         });
 
         // Fully consume the stdout/stderr streams before waiting on the exit stream.
-        let stdout_stream = stream_for(child.stdout.take().unwrap())
-            .map_ok(|bytes| ChildOutput::Stdout(bytes.into()));
-        let stderr_stream = stream_for(child.stderr.take().unwrap())
-            .map_ok(|bytes| ChildOutput::Stderr(bytes.into()));
+        let stdout_stream = stream_for(child.stdout.take().unwrap()).map_ok(ChildOutput::Stdout);
+        let stderr_stream = stream_for(child.stderr.take().unwrap()).map_ok(ChildOutput::Stderr);
         let output_stream = stream::select(stdout_stream, stderr_stream).boxed();
 
         let killed = Arc::new(Notify::new());

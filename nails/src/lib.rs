@@ -192,7 +192,7 @@ mod tests {
     ) {
         // Ask the nail to run for a multiple of the heartbeat frequency, so that multiple
         // heartbeats are required to succeed.
-        let nail_delay = server_config.heartbeat_frequency.map(|f| f * 4);
+        let nail_delay = server_config.heartbeat_frequency.map(|f| f * 10);
         let success_exit_code = ExitCode(67);
         let (addr, _) =
             one_connection_server(server_config, ConstantNail(nail_delay, success_exit_code)).await;
