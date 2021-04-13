@@ -1,5 +1,3 @@
-use futures;
-
 use std::fmt::Debug;
 use std::io;
 use std::path::PathBuf;
