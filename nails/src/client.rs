@@ -164,7 +164,7 @@ where
         //
         // We wrap in Abortable so that dropping the Child instance cancels the background task.
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let stdio_task = handle_stdio(server_read, server_write.clone(), cli_write, open_cli_read);
+        let stdio_task = handle_stdio(server_read, server_write, cli_write, open_cli_read);
         let exit_code_result = tokio::spawn(Abortable::new(stdio_task, abort_registration));
         let exit_code = async move {
             match exit_code_result.await.unwrap() {
@@ -199,14 +199,14 @@ async fn handle_stdio<S: ServerSink>(
                 trace!("nails client got {} bytes of stderr.", bytes.len());
                 cli_write
                     .send(ChildOutput::Stderr(bytes))
-                    .map_err(|e| send_to_io(e))
+                    .map_err(send_to_io)
                     .await?;
             }
             OutputChunk::Stdout(bytes) => {
                 trace!("nails client got {} bytes of stdout.", bytes.len());
                 cli_write
                     .send(ChildOutput::Stdout(bytes))
-                    .map_err(|e| send_to_io(e))
+                    .map_err(send_to_io)
                     .await?;
             }
             OutputChunk::StartReadingStdin => {
@@ -247,7 +247,7 @@ async fn stdin_sender<S: ServerSink>(
     }
 
     if let Some(ref mut server_write) = *server_write.lock().await {
-        server_write.send(InputChunk::StdinEOF).await?;
+        server_write.send(InputChunk::StdinEof).await?;
     }
     Ok(())
 }

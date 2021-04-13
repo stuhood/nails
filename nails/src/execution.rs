@@ -67,7 +67,7 @@ impl Decoder for IdentityCodec {
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             Ok(None)
         } else {
             Ok(Some(buf.split().freeze()))
@@ -79,7 +79,7 @@ impl Encoder<Bytes> for IdentityCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Bytes, buf: &mut BytesMut) -> Result<(), io::Error> {
-        if item.len() > 0 {
+        if !item.is_empty() {
             buf.extend(item);
         }
         Ok(())

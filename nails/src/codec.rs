@@ -22,7 +22,7 @@ pub enum InputChunk {
     Command(String),
     Heartbeat,
     Stdin(Bytes),
-    StdinEOF,
+    StdinEof,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,7 +58,8 @@ impl Encoder<InputChunk> for ClientCodec {
     type Error = io::Error;
 
     fn encode(&mut self, msg: InputChunk, buf: &mut BytesMut) -> io::Result<()> {
-        encode(Chunk::Input(msg), buf)
+        encode(Chunk::Input(msg), buf);
+        Ok(())
     }
 }
 
@@ -85,7 +86,8 @@ impl Encoder<OutputChunk> for ServerCodec {
     type Error = io::Error;
 
     fn encode(&mut self, msg: OutputChunk, buf: &mut BytesMut) -> io::Result<()> {
-        encode(Chunk::Output(msg), buf)
+        encode(Chunk::Output(msg), buf);
+        Ok(())
     }
 }
 
@@ -119,7 +121,7 @@ fn decode(buf: &mut BytesMut) -> Result<Option<Chunk>, io::Error> {
         b'C' => input_msg(InputChunk::Command(to_string(&chunk)?)),
         b'H' => input_msg(InputChunk::Heartbeat),
         b'0' => input_msg(InputChunk::Stdin(chunk.freeze())),
-        b'.' => input_msg(InputChunk::StdinEOF),
+        b'.' => input_msg(InputChunk::StdinEof),
         b'S' => output_msg(OutputChunk::StartReadingStdin),
         b'1' => output_msg(OutputChunk::Stdout(chunk.freeze())),
         b'2' => output_msg(OutputChunk::Stderr(chunk.freeze())),
@@ -136,7 +138,7 @@ fn decode(buf: &mut BytesMut) -> Result<Option<Chunk>, io::Error> {
     }
 }
 
-fn encode(msg: Chunk, buf: &mut BytesMut) -> io::Result<()> {
+fn encode(msg: Chunk, buf: &mut BytesMut) {
     let initial_offset = buf.len();
 
     // Reserve enough space for the header, and then append the chunk.
@@ -183,7 +185,7 @@ fn encode(msg: Chunk, buf: &mut BytesMut) -> io::Result<()> {
                 buf.extend_from_slice(&bytes);
                 b'0'
             }
-            InputChunk::StdinEOF => b'.',
+            InputChunk::StdinEof => b'.',
         },
     };
 
@@ -192,7 +194,6 @@ fn encode(msg: Chunk, buf: &mut BytesMut) -> io::Result<()> {
     let chunk_len = buf.len() - header_end;
     BigEndian::write_u32(&mut buf[initial_offset..(header_end - 1)], chunk_len as u32);
     buf[header_end - 1] = msg_type;
-    Ok(())
 }
 
 fn input_msg(message: InputChunk) -> Result<Option<Chunk>, io::Error> {
@@ -222,7 +223,7 @@ mod tests {
         let mut buf = {
             let mut buf = BytesMut::with_capacity(1024);
             for chunk in chunks.clone() {
-                encode(chunk, &mut buf).unwrap();
+                encode(chunk, &mut buf);
             }
             buf.split()
         };
