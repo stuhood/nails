@@ -196,10 +196,12 @@ fn encode(msg: Chunk, buf: &mut BytesMut) {
     buf[header_end - 1] = msg_type;
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn input_msg(message: InputChunk) -> Result<Option<Chunk>, io::Error> {
     Ok(Some(Chunk::Input(message)))
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn output_msg(message: OutputChunk) -> Result<Option<Chunk>, io::Error> {
     Ok(Some(Chunk::Output(message)))
 }
