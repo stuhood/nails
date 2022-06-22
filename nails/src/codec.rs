@@ -126,9 +126,11 @@ fn decode(buf: &mut BytesMut) -> Result<Option<Chunk>, io::Error> {
         b'1' => output_msg(OutputChunk::Stdout(chunk.freeze())),
         b'2' => output_msg(OutputChunk::Stderr(chunk.freeze())),
         b'X' => {
-            let exit_code = to_string(&chunk)?
+            let chunk_str = to_string(&chunk)?;
+            let exit_code = chunk_str
+                .trim()
                 .parse()
-                .map_err(|e| err(&format!("{}", e)))?;
+                .map_err(|e| err(&format!("For {chunk_str:?}: {e}")))?;
             output_msg(OutputChunk::Exit(exit_code))
         }
         b => Err(err(&format!(
