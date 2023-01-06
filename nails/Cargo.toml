@@ -18,9 +18,9 @@ bytes = "1.0"
 byteorder = "1"
 futures = "0.3"
 log = "0.4"
-tokio = { version = "1.8", features = ["net", "sync", "time"] }
+tokio = { version = "1.18", features = ["net", "sync", "time"] }
 tokio-util = { version = "0.6", features = ["codec"] }
 
 [dev-dependencies]
 env_logger = "0.9"
-tokio = { version = "1.8", features = ["macros", "net", "rt"] }
+tokio = { version = "1.18", features = ["macros", "net", "rt"] }
